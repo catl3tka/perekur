@@ -347,7 +347,49 @@ def get_current_week_key():
     monday, _ = get_current_week_range()
     return monday.strftime('%Y-%W')
 
-def update_weekly_stats():
+def create_backup():
+    """Создание резервной копии данных"""
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, 'r', encoding='utf-8') as source:
+                data = source.read()
+            with open(BACKUP_FILE, 'w', encoding='utf-8') as target:
+                target.write(data)
+            logger.info("Резервная копия данных создана")
+        except Exception as e:
+            logger.error(f"Ошибка при создании бэкапа: {e}")
+
+# ИСПРАВЛЕННЫЕ АСИНХРОННЫЕ ФУНКЦИИ
+async def save_data(context=None):
+    """Сохранение данных в JSON файл"""
+    create_backup()
+    data = {
+        "stats_yes": dict(stats_yes),
+        "stats_no": dict(stats_no),
+        "stats_stickers": dict(stats_stickers),
+        "stats_photos": dict(stats_photos),
+        "usernames": usernames,
+        "sessions": [(t.isoformat(), uid, ans) for t, uid, ans in sessions],
+        "consecutive_yes": dict(consecutive_yes),
+        "consecutive_no": dict(consecutive_no),
+        "consecutive_button_press": dict(consecutive_button_press),
+        "last_button_press_time": {str(k): v.isoformat() for k, v in last_button_press_time.items()},
+        "achievements_unlocked": {str(uid): list(achs) for uid, achs in achievements_unlocked.items()},
+        "successful_polls": [t.isoformat() for t in successful_polls],
+        "user_levels": {str(uid): levels for uid, levels in user_levels.items()},
+        "asked_today": list(asked_today),
+        "weekly_stats_yes": dict(weekly_stats_yes),
+        "weekly_stats_no": dict(weekly_stats_no),
+        "current_week_key": current_week_key,
+    }
+    try:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.info("Данные успешно сохранены")
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении данных: {e}")
+
+async def update_weekly_stats(context=None):
     """Обновление недельной статистики на основе текущей недели"""
     global current_week_key, weekly_stats_yes, weekly_stats_no
     
@@ -371,50 +413,6 @@ def update_weekly_stats():
                 weekly_stats_yes[uid] += 1
             elif ans == "Нет":
                 weekly_stats_no[uid] += 1
-
-# --- Сохранение/загрузка ---
-def create_backup():
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, 'r', encoding='utf-8') as source:
-                data = source.read()
-            with open(BACKUP_FILE, 'w', encoding='utf-8') as target:
-                target.write(data)
-            logger.info("Резервная копия данных создана")
-        except Exception as e:
-            logger.error(f"Ошибка при создании бэкапа: {e}")
-
-# ИСПРАВЛЕННАЯ ФУНКЦИЯ save_data
-def save_data(context=None):
-    """Сохранение данных в JSON файл"""
-    create_backup()
-    data = {
-        "stats_yes": dict(stats_yes),
-        "stats_no": dict(stats_no),
-        "stats_stickers": dict(stats_stickers),
-        "stats_photos": dict(stats_photos),
-        "usernames": usernames,
-        "sessions": [(t.isoformat(), uid, ans) for t, uid, ans in sessions],
-        "consecutive_yes": dict(consecutive_yes),
-        "consecutive_no": dict(consecutive_no),
-        "consecutive_button_press": dict(consecutive_button_press),
-        "last_button_press_time": {str(k): v.isoformat() for k, v in last_button_press_time.items()},
-        "achievements_unlocked": {str(uid): list(achs) for uid, achs in achievements_unlocked.items()},
-        "successful_polls": [t.isoformat() for t in successful_polls],
-        "user_levels": {str(uid): levels for uid, levels in user_levels.items()},
-        # СИСТЕМА КОНТЕНТА: сохраняем только asked_today
-        "asked_today": list(asked_today),
-        # НЕДЕЛЬНАЯ СТАТИСТИКА
-        "weekly_stats_yes": dict(weekly_stats_yes),
-        "weekly_stats_no": dict(weekly_stats_no),
-        "current_week_key": current_week_key,
-    }
-    try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        logger.info("Данные успешно сохранены")
-    except Exception as e:
-        logger.error(f"Ошибка при сохранении данных: {e}")
 
 def load_data():
     global stats_yes, stats_no, stats_stickers, stats_photos
@@ -442,10 +440,7 @@ def load_data():
         successful_polls.extend([datetime.fromisoformat(t) for t in data.get("successful_polls", [])])
         user_levels.update({int(uid): levels for uid, levels in data.get("user_levels", {}).items()})
         
-        # СИСТЕМА КОНТЕНТА: загружаем asked_today
         asked_today.update(data.get("asked_today", []))
-        
-        # НЕДЕЛЬНАЯ СТАТИСТИКА
         weekly_stats_yes.update(data.get("weekly_stats_yes", {}))
         weekly_stats_no.update(data.get("weekly_stats_no", {}))
         current_week_key = data.get("current_week_key")
@@ -465,9 +460,6 @@ def load_data():
         
         logger.info("Данные успешно загружены")
         
-        # Обновляем недельную статистику после загрузки
-        update_weekly_stats()
-        
     except json.JSONDecodeError as e:
         logger.error(f"Ошибка формата JSON: {e}")
     except Exception as e:
@@ -477,7 +469,7 @@ def load_data():
 async def give_achievement(user_id: int, context: ContextTypes.DEFAULT_TYPE, achievement_name: str):
     if achievement_name not in achievements_unlocked[user_id]:
         achievements_unlocked[user_id].add(achievement_name)
-        save_data()
+        await save_data()
         
         try:
             await context.bot.send_message(chat_id=user_id, text=f"🏅 Ачивка: {achievement_name}")
@@ -512,19 +504,16 @@ async def check_level_up(user_id: int, context: ContextTypes.DEFAULT_TYPE):
     yes_count = stats_yes[user_id]
     no_count = stats_no[user_id]
     
-    # Получаем текущие и новые уровни
     current_smoker_level = user_levels[user_id].get("smoker_level", 0)
     current_worker_level = user_levels[user_id].get("worker_level", 0)
     
     new_smoker_level, smoker_threshold = get_smoker_level(yes_count)
     new_worker_level, worker_threshold = get_worker_level(no_count)
     
-    # Проверяем повышение уровня курильщика
     if smoker_threshold > current_smoker_level:
         user_levels[user_id]["smoker_level"] = smoker_threshold
         username = usernames.get(user_id, "Неизвестный")
         
-        # Уведомление в личку
         try:
             await context.bot.send_message(
                 chat_id=user_id, 
@@ -533,7 +522,6 @@ async def check_level_up(user_id: int, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.warning(f"Не удалось отправить уведомление о уровне пользователю {user_id}: {e}")
         
-        # Уведомление в группу
         try:
             await context.bot.send_message(
                 chat_id=GROUP_CHAT_ID,
@@ -544,12 +532,10 @@ async def check_level_up(user_id: int, context: ContextTypes.DEFAULT_TYPE):
         
         logger.info(f"Пользователь {user_id} повысил уровень курильщика до {new_smoker_level}")
     
-    # Проверяем повышение уровня работяги
     if worker_threshold > current_worker_level:
         user_levels[user_id]["worker_level"] = worker_threshold
         username = usernames.get(user_id, "Неизвестный")
         
-        # Уведомление в личку
         try:
             await context.bot.send_message(
                 chat_id=user_id, 
@@ -558,7 +544,6 @@ async def check_level_up(user_id: int, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.warning(f"Не удалось отправить уведомление о уровне пользователю {user_id}: {e}")
         
-        # Уведомление в группу
         try:
             await context.bot.send_message(
                 chat_id=GROUP_CHAT_ID,
@@ -569,20 +554,18 @@ async def check_level_up(user_id: int, context: ContextTypes.DEFAULT_TYPE):
         
         logger.info(f"Пользователь {user_id} повысил уровень работяги до {new_worker_level}")
     
-    save_data()
+    await save_data()
 
 # --- Проверка ачивок ---
 async def check_achievements(user_id: int, context: ContextTypes.DEFAULT_TYPE):
-    # Используем екатеринбургское время для проверки ачивок
     now_utc = datetime.utcnow()
-    now_ekt = now_utc + timedelta(hours=5)  # YEKT = UTC + 5
+    now_ekt = now_utc + timedelta(hours=5)
     
     week_ago = now_ekt - timedelta(days=7)
     
-    # Фильтруем сессии по екатеринбургскому времени
     yes_week = sum(1 for t, uid, ans in sessions 
                   if uid == user_id and ans == "Да, конечно" 
-                  and (t + timedelta(hours=5)) >= week_ago)  # Конвертируем время сессии в ЕКБ
+                  and (t + timedelta(hours=5)) >= week_ago)
     no_week = sum(1 for t, uid, ans in sessions 
                  if uid == user_id and ans == "Нет" 
                  and (t + timedelta(hours=5)) >= week_ago)
@@ -592,7 +575,7 @@ async def check_achievements(user_id: int, context: ContextTypes.DEFAULT_TYPE):
     if consecutive_no[user_id] >= CONSECUTIVE_THRESHOLD:
         await give_achievement(user_id, context, "Серийный ЗОЖник")
 
-    h = now_ekt.hour  # Используем екатеринбургское время для проверки времени суток
+    h = now_ekt.hour
     if consecutive_yes[user_id] >= 1:
         if 0 <= h <= 7:
             await give_achievement(user_id, context, "Ранний перекур")
@@ -604,7 +587,6 @@ async def check_achievements(user_id: int, context: ContextTypes.DEFAULT_TYPE):
     if stats_photos[user_id] >= ACHIEVEMENT_PHOTOS_20:
         await give_achievement(user_id, context, "Мемолог")
 
-    # Проверяем повышение уровней
     await check_level_up(user_id, context)
 
 # --- Функции для группировки топов ---
@@ -613,10 +595,8 @@ def get_grouped_top(stats_dict, level_func):
     if not stats_dict:
         return []
     
-    # Сортируем по убыванию
     sorted_stats = sorted(stats_dict.items(), key=lambda x: x[1], reverse=True)
     
-    # Группируем по значениям
     groups = []
     current_group = []
     current_value = None
@@ -633,14 +613,12 @@ def get_grouped_top(stats_dict, level_func):
     if current_group:
         groups.append(current_group)
     
-    # Присваиваем места (1, 2, 3) каждой группе
     result = []
     
     for place, group in enumerate(groups, 1):
-        if place > 3:  # Ограничиваем тремя местами
+        if place > 3:
             break
             
-        # Все участники в группе получают одинаковое место
         for user_id, count in group:
             username = usernames.get(user_id, "Неизвестный")
             level_name, _ = level_func(count)
@@ -651,23 +629,17 @@ def get_grouped_top(stats_dict, level_func):
 # --- ОБНОВЛЕННАЯ ФУНКЦИЯ ПЯТНИЧНОГО НАГРАЖДЕНИЯ ---
 async def friday_rewards(context: ContextTypes.DEFAULT_TYPE):
     """Пятничное награждение по недельному топу"""
-    # Используем екатеринбургское время
     now_ekt = datetime.utcnow() + timedelta(hours=5)
     
-    # Проверяем, что сегодня пятница (4) и время около 17:00
     if now_ekt.weekday() != 4 or now_ekt.hour < 16:
         return
     
     logger.info("🎉 Запуск пятничного награждения по недельному топу")
     
     try:
-        # Обновляем недельную статистику перед подсчетом
-        update_weekly_stats()
+        await update_weekly_stats()
         
-        # Группируем топ курильщика за неделю (первые 3 места)
         top_smokers_grouped = get_grouped_top(dict(weekly_stats_yes), get_smoker_level)
-        
-        # Группируем топ работяг за неделю (первые 3 места)
         top_workers_grouped = get_grouped_top(dict(weekly_stats_no), get_worker_level)
         
         week_range = get_week_range_display()
@@ -676,14 +648,12 @@ async def friday_rewards(context: ContextTypes.DEFAULT_TYPE):
         if top_smokers_grouped:
             message += "🏆 *Топ курильщиков этой недели:*\n"
             
-            # Группируем по местам для вывода
             current_place = None
             current_winners = []
             
             for place, username, count, level in top_smokers_grouped:
                 if place != current_place:
                     if current_winners:
-                        # Выводим предыдущую группу
                         if len(current_winners) == 1:
                             medal = "🥇" if current_place == 1 else "🥈" if current_place == 2 else "🥉"
                             message += f"{medal} {current_winners[0]}\n"
@@ -697,7 +667,6 @@ async def friday_rewards(context: ContextTypes.DEFAULT_TYPE):
                 else:
                     current_winners.append(f"{username} — {count} раз ({level})")
             
-            # Выводим последнюю группу
             if current_winners:
                 if len(current_winners) == 1:
                     medal = "🥇" if current_place == 1 else "🥈" if current_place == 2 else "🥉"
@@ -714,14 +683,12 @@ async def friday_rewards(context: ContextTypes.DEFAULT_TYPE):
         if top_workers_grouped:
             message += "💪 *Топ работяг этой недели:*\n"
             
-            # Группируем по местам для вывода
             current_place = None
             current_winners = []
             
             for place, username, count, level in top_workers_grouped:
                 if place != current_place:
                     if current_winners:
-                        # Выводим предыдущую группу
                         if len(current_winners) == 1:
                             medal = "🥇" if current_place == 1 else "🥈" if current_place == 2 else "🥉"
                             message += f"{medal} {current_winners[0]}\n"
@@ -735,7 +702,6 @@ async def friday_rewards(context: ContextTypes.DEFAULT_TYPE):
                 else:
                     current_winners.append(f"{username} — {count} раз ({level})")
             
-            # Выводим последнюю группу
             if current_winners:
                 if len(current_winners) == 1:
                     medal = "🥇" if current_place == 1 else "🥈" if current_place == 2 else "🥉"
@@ -747,7 +713,6 @@ async def friday_rewards(context: ContextTypes.DEFAULT_TYPE):
         else:
             message += "💼 На этой неделе никто не работал\n"
         
-        # Общая статистика за неделю
         monday, friday = get_current_week_range()
         week_sessions = [s for s in sessions if monday <= (s[0] + timedelta(hours=5)) <= friday]
         week_polls = [p for p in successful_polls if monday <= (p + timedelta(hours=5)) <= friday]
@@ -772,13 +737,11 @@ async def friday_rewards(context: ContextTypes.DEFAULT_TYPE):
 # --- СИСТЕМА КОНТЕНТА ДНЯ ---
 def get_active_users():
     """Получить список активных пользователей за последние 7 дней"""
-    # Используем екатеринбургское время
     now_ekt = datetime.utcnow() + timedelta(hours=5)
     week_ago = now_ekt - timedelta(days=7)
     active_users = set()
     
     for t, uid, _ in sessions:
-        # Конвертируем время сессии в ЕКБ для сравнения
         session_time_ekt = t + timedelta(hours=5)
         if session_time_ekt >= week_ago:
             active_users.add(uid)
@@ -797,20 +760,17 @@ async def ask_for_content(context: ContextTypes.DEFAULT_TYPE, user_id: int = Non
     """Запросить контент у пользователя"""
     global current_content_author
     
-    # Проверяем рабочий день (Пн-Пт) по екатеринбургскому времени
     now_ekt = datetime.utcnow() + timedelta(hours=5)
-    if now_ekt.weekday() >= 5:  # 5=Сб, 6=Вс
+    if now_ekt.weekday() >= 5:
         logger.info("📅 Сегодня выходной, пропускаем запрос контента")
         return
     
-    # Если пользователь не указан, выбираем случайного
     if user_id is None:
         active_users = get_active_users()
         if not active_users:
             logger.info("👥 Нет активных пользователей для запроса контента")
             return
         
-        # Исключаем уже опрошенных сегодня
         available_users = [uid for uid in active_users if uid not in asked_today]
         if not available_users:
             logger.info("📝 Все активные пользователи уже были опрошены сегодня")
@@ -818,7 +778,6 @@ async def ask_for_content(context: ContextTypes.DEFAULT_TYPE, user_id: int = Non
         
         user_id = random.choice(available_users)
     
-    # Сохраняем текущего автора
     current_content_author = user_id
     asked_today.add(user_id)
     
@@ -841,7 +800,6 @@ async def ask_for_content(context: ContextTypes.DEFAULT_TYPE, user_id: int = Non
         
     except Exception as e:
         logger.error(f"❌ Ошибка при отправке запроса пользователю {user_id}: {e}")
-        # Переходим к следующему пользователю
         await ask_for_content(context)
 
 async def handle_content_submission(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -849,20 +807,15 @@ async def handle_content_submission(update: Update, context: ContextTypes.DEFAUL
     user_id = update.effective_user.id
     message = update.message
     
-    # Проверяем, был ли пользователь выбран сегодня для отправки контента
     if user_id not in asked_today:
         return
     
-    today_ekt = (datetime.utcnow() + timedelta(hours=5)).date()
-    
     try:
-        # Сохраняем сообщение для последуючной публикации
         content_submissions[user_id] = {
             "message": message,
-            "date": datetime.utcnow()  # Сохраняем в UTC
+            "date": datetime.utcnow()
         }
         
-        # Определяем тип контента для логов
         content_type = "текст"
         if message.photo:
             content_type = "картинка"
@@ -894,10 +847,8 @@ async def handle_content_submission(update: Update, context: ContextTypes.DEFAUL
 
 async def publish_daily_content(context: ContextTypes.DEFAULT_TYPE):
     """Публикация ежедневного контента в 10:00"""
-    # Используем екатеринбургское время
     today_ekt = (datetime.utcnow() + timedelta(hours=5)).date()
     
-    # Проверяем рабочий день
     if (datetime.utcnow() + timedelta(hours=5)).weekday() >= 5:
         logger.info("📅 Сегодня выходной, пропускаем публикацию контента")
         return
@@ -917,7 +868,6 @@ async def publish_daily_content(context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        # Отправляем заголовок
         await context.bot.send_message(
             chat_id=GROUP_CHAT_ID,
             text="📰 *Контент дня!*\n\n"
@@ -925,11 +875,9 @@ async def publish_daily_content(context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
         
-        # Пересылаем все сохраненные сообщения (анонимно)
         for user_id, submission in content_submissions.items():
             message = submission["message"]
             
-            # Пересылаем сообщение в группу (без указания автора)
             if message.text:
                 await context.bot.send_message(
                     chat_id=GROUP_CHAT_ID,
@@ -976,7 +924,6 @@ async def publish_daily_content(context: ContextTypes.DEFAULT_TYPE):
                     voice=message.voice.file_id
                 )
         
-        # Отправляем завершающее сообщение
         await context.bot.send_message(
             chat_id=GROUP_CHAT_ID,
             text="🎭 *Контент опубликован анонимно*\n\n"
@@ -989,7 +936,6 @@ async def publish_daily_content(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"❌ Ошибка при публикации контента дня: {e}")
     
-    # Сбрасываем состояние
     reset_daily_content()
 
 # --- ОБНОВЛЕННАЯ ФУНКЦИЯ handle_button ---
@@ -1107,21 +1053,17 @@ async def show_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        # Создаем персональный график
         plot_buf = create_user_stats_plot(user_id)
         
         if plot_buf:
-            # Статистика с уровнями
             yes_count = stats_yes[user_id]
             no_count = stats_no[user_id]
             total = yes_count + no_count
             participation_rate = (total / len(successful_polls)) * 100 if successful_polls else 0
             
-            # Получаем текущие уровни
             smoker_level, _ = get_smoker_level(yes_count)
             worker_level, _ = get_worker_level(no_count)
             
-            # Серийные достижения
             current_streak = max(consecutive_yes[user_id], consecutive_no[user_id])
             streak_type = ""
             if consecutive_yes[user_id] == current_streak:
@@ -1147,7 +1089,6 @@ async def show_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption=caption
             )
         else:
-            # Если график не создался, показываем текстовую версию
             await show_basic_me(update, context)
             
     except Exception as e:
@@ -1162,11 +1103,9 @@ async def show_basic_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total = yes_count + no_count
     participation_rate = (total / len(successful_polls)) * 100 if successful_polls else 0
     
-    # Получаем текущие уровни
     smoker_level, _ = get_smoker_level(yes_count)
     worker_level, _ = get_worker_level(no_count)
     
-    # Серийные достижения
     current_streak = max(consecutive_yes[user_id], consecutive_no[user_id])
     streak_type = ""
     if consecutive_yes[user_id] == current_streak:
@@ -1196,16 +1135,13 @@ async def show_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📊 Пока нет статистики.")
         return
     
-    # Обновляем недельную статистику
-    update_weekly_stats()
+    await update_weekly_stats()
     
     week_range = get_week_range_display()
     response = f"🏆 *ТОП УЧАСТНИКОВ*\n\n"
     
-    # НЕДЕЛЬНАЯ СТАТИСТИКА
     response += f"📅 *ТЕКУЩАЯ НЕДЕЛЯ ({week_range})*\n\n"
     
-    # Топ курильщиков за текущую неделю
     if weekly_stats_yes:
         response += "🚬 *Топ курильщиков (неделя):*\n"
         smoker_top = get_grouped_top(weekly_stats_yes, get_smoker_level)
@@ -1217,7 +1153,6 @@ async def show_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     response += "\n"
     
-    # Топ работяг за текущую неделю
     if weekly_stats_no:
         response += "💪 *Топ работяг (неделя):*\n"
         worker_top = get_grouped_top(weekly_stats_no, get_worker_level)
@@ -1229,10 +1164,8 @@ async def show_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     response += "\n" + "="*40 + "\n\n"
     
-    # ОБЩАЯ СТАТИСТИКА (ВСЕ ВРЕМЯ)
     response += "📊 *ОБЩАЯ СТАТИСТИКА (все время)*\n\n"
     
-    # Общий топ курильщиков
     if stats_yes:
         response += "🚬 *Топ курильщиков (все время):*\n"
         overall_smoker_top = get_grouped_top(stats_yes, get_smoker_level)
@@ -1244,7 +1177,6 @@ async def show_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     response += "\n"
     
-    # Общий топ работяг
     if stats_no:
         response += "💪 *Топ работяг (все время):*\n"
         overall_worker_top = get_grouped_top(stats_no, get_worker_level)
@@ -1280,7 +1212,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def check_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Проверить время сервера и екатеринбургское время"""
     now_utc = datetime.utcnow()
-    now_ekt = now_utc + timedelta(hours=5)  # YEKT = UTC + 5
+    now_ekt = now_utc + timedelta(hours=5)
     
     await update.message.reply_text(
         f"⏰ *Текущее время:*\n"
@@ -1322,7 +1254,7 @@ async def reset_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global current_week_key
     current_week_key = None
     
-    save_data()
+    await save_data()
     await update.message.reply_text("🔄 Статистика и ачивки сброшены!")
 
 async def test_weekly_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1374,10 +1306,8 @@ async def show_scheduled_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE
 # --- Вспомогательные функции для планировщика ---
 async def daily_content_reminder(context: ContextTypes.DEFAULT_TYPE):
     """Напоминание о контенте дня в 9:30"""
-    # Используем екатеринбургское время
     now_ekt = datetime.utcnow() + timedelta(hours=5)
     
-    # Проверяем рабочий день и время
     if now_ekt.weekday() >= 5 or now_ekt.hour != 9 or now_ekt.minute != 30:
         return
     
@@ -1444,7 +1374,7 @@ async def handle_poll_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await check_achievements(user_id, context)
         
         # Обновляем недельную статистику
-        update_weekly_stats()
+        await update_weekly_stats()
         
         # Проверяем успешность опроса
         yes_votes = sum(1 for vote in poll_votes.values() if vote == "Да, конечно")
@@ -1452,7 +1382,7 @@ async def handle_poll_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
             successful_polls.append(last_poll_time)
             logger.info(f"Успешный перекур! {yes_votes} голосов 'Да'")
         
-        save_data()
+        await save_data()
         
         # Сбрасываем состояние
         active_poll_id = None
@@ -1475,11 +1405,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if message.sticker:
         stats_stickers[user_id] += 1
         await check_achievements(user_id, context)
-        save_data()
+        await save_data()
     elif message.photo:
         stats_photos[user_id] += 1
         await check_achievements(user_id, context)
-        save_data()
+        await save_data()
 
 # --- Обработчик ошибок ---
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1487,7 +1417,6 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Ошибка при обработке обновления {update}: {context.error}", exc_info=context.error)
     
     try:
-        # Пытаемся отправить сообщение об ошибке пользователю
         if update and update.effective_message:
             await update.effective_message.reply_text(
                 "❌ Произошла ошибка при обработке запроса. Попробуйте позже."
@@ -1517,7 +1446,6 @@ def main():
     # Обработчики сообщений
     application.add_handler(MessageHandler(filters.Regex("^Курить 🚬$"), handle_button))
     
-    # ОБНОВЛЕННЫЙ ФИЛЬТР для обработки всех типов сообщений
     application.add_handler(MessageHandler(
         filters.TEXT | filters.PHOTO | filters.VIDEO | filters.AUDIO | 
         filters.Document.ALL | filters.ANIMATION | filters.VOICE | filters.Sticker.ALL, 
@@ -1528,7 +1456,6 @@ def main():
     application.add_handler(PollAnswerHandler(handle_poll_answer))
     application.add_handler(MessageHandler(filters.POLL, handle_poll_update))
     
-    # ДОБАВЛЕНО: Регистрация обработчика ошибок
     application.add_error_handler(error_handler)
     
     # Планировщик задач
@@ -1537,49 +1464,49 @@ def main():
     # Ежедневный сброс состояния контента в 00:01 ЕКБ (19:01 UTC)
     job_queue.run_daily(
         reset_daily_content,
-        time=time(hour=19, minute=1, second=0),  # 00:01 ЕКБ
+        time=time(hour=19, minute=1, second=0),
         days=(0, 1, 2, 3, 4, 5, 6)
     )
     
     # Запрос контента в 9:00 ЕКБ (4:00 UTC)
     job_queue.run_daily(
-        ask_for_content,
-        time=time(hour=4, minute=0, second=0),  # 9:00 ЕКБ
-        days=(0, 1, 2, 3, 4)  # Пн-Пт
+        lambda context: asyncio.create_task(ask_for_content(context)),
+        time=time(hour=4, minute=0, second=0),
+        days=(0, 1, 2, 3, 4)
     )
     
     # Напоминание о контенте в 9:30 ЕКБ (4:30 UTC)
     job_queue.run_daily(
         daily_content_reminder,
-        time=time(hour=4, minute=30, second=0),  # 9:30 ЕКБ
-        days=(0, 1, 2, 3, 4)  # Пн-Пт
+        time=time(hour=4, minute=30, second=0),
+        days=(0, 1, 2, 3, 4)
     )
     
     # Публикация контента в 10:00 ЕКБ (5:00 UTC)
     job_queue.run_daily(
         publish_daily_content,
-        time=time(hour=5, minute=0, second=0),  # 10:00 ЕКБ
-        days=(0, 1, 2, 3, 4)  # Пн-Пт
+        time=time(hour=5, minute=0, second=0),
+        days=(0, 1, 2, 3, 4)
     )
     
     # Пятничное награждение в 17:00 ЕКБ (12:00 UTC)
     job_queue.run_daily(
         friday_rewards,
-        time=time(hour=12, minute=0, second=0),  # 17:00 ЕКБ
-        days=(4,)  # Только пятница
+        time=time(hour=12, minute=0, second=0),
+        days=(4,)
     )
     
-    # Сохранение данных каждые 5 минут (ИСПРАВЛЕННАЯ ФУНКЦИЯ)
+    # Сохранение данных каждые 5 минут
     job_queue.run_repeating(
         save_data,
         interval=300,
         first=10
     )
     
-    # Еженедельное обновление статистики (для автоматического сброса в понедельник)
+    # Еженедельное обновление статистики
     job_queue.run_repeating(
         update_weekly_stats,
-        interval=3600,  # Каждый час
+        interval=3600,
         first=10
     )
     
@@ -1587,4 +1514,5 @@ def main():
     application.run_polling()
 
 if __name__ == "__main__":
+    import asyncio
     main()
