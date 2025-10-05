@@ -16,7 +16,7 @@ from telegram.ext import (
 
 # --- Настройки ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GROUP_CHAT_ID = -1003072750672
+GROUP_CHAT_ID = -1003065779971
 ADMIN_ID = 284884293
 DATA_FILE = "bot_data.json"
 BACKUP_FILE = "bot_data_backup.json"
@@ -1516,3 +1516,4 @@ def main():
 if __name__ == "__main__":
     import asyncio
     main()
+
