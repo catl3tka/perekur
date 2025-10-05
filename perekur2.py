@@ -856,7 +856,7 @@ async def handle_content_submission(update: Update, context: ContextTypes.DEFAUL
     today_ekt = (datetime.utcnow() + timedelta(hours=5)).date()
     
     try:
-        # Сохраняем сообщение для последующей публикации
+        # Сохраняем сообщение для последуючной публикации
         content_submissions[user_id] = {
             "message": message,
             "date": datetime.utcnow()  # Сохраняем в UTC
@@ -1037,8 +1037,6 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         poll_votes = {}
         logger.info(f"Создан новый опрос {active_poll_id} пользователем {user_id}")
         
-        # УБРАНО: сообщение "✅ Опрос создан!" - теперь бот просто создает опрос без уведомлений
-        
     except Exception as e:
         logger.error(f"Ошибка при создании опроса: {e}")
         await update.message.reply_text("❌ Ошибка при создании опроса.", reply_markup=reply_markup)
@@ -1057,7 +1055,7 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Используй:
 /stats_detailed - подробная статистика с графиками
 /me - твоя персональная статистика с графиками
-/top - топ курильщиков и работяг
+/top - топ курильщиков и работяг (неделя + общая)
 /help - все команды"""
     
     await update.message.reply_text(text)
@@ -1193,7 +1191,7 @@ async def show_basic_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- ОБНОВЛЕННАЯ КОМАНДА /top ---
 async def show_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Объединенный топ курильщиков и работяг с новой логикой недельного топа"""
+    """Объединенный топ курильщиков и работяг с недельной и общей статистикой"""
     if not sessions:
         await update.message.reply_text("📊 Пока нет статистики.")
         return
@@ -1202,32 +1200,61 @@ async def show_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_weekly_stats()
     
     week_range = get_week_range_display()
-    response = f"🏆 *ТОП УЧАСТНИКОВ* (неделя {week_range})\n\n"
+    response = f"🏆 *ТОП УЧАСТНИКОВ*\n\n"
+    
+    # НЕДЕЛЬНАЯ СТАТИСТИКА
+    response += f"📅 *ТЕКУЩАЯ НЕДЕЛЯ ({week_range})*\n\n"
     
     # Топ курильщиков за текущую неделю
     if weekly_stats_yes:
-        response += "🚬 *ТОП КУРИЛЬЩИКОВ (текущая неделя):*\n"
+        response += "🚬 *Топ курильщиков (неделя):*\n"
         smoker_top = get_grouped_top(weekly_stats_yes, get_smoker_level)
         for place, username, count, level in smoker_top:
             medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(place, "🏅")
             response += f"{medal} {username}: {count} раз - {level}\n"
     else:
-        response += "🚬 *ТОП КУРИЛЬЩИКОВ:*\nПока нет данных за эту неделю\n"
+        response += "🚬 *Топ курильщиков (неделя):*\nПока нет данных\n"
     
     response += "\n"
     
     # Топ работяг за текущую неделю
     if weekly_stats_no:
-        response += "💪 *ТОП РАБОТЯГ (текущая неделя):*\n"
+        response += "💪 *Топ работяг (неделя):*\n"
         worker_top = get_grouped_top(weekly_stats_no, get_worker_level)
         for place, username, count, level in worker_top:
             medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(place, "🏅")
             response += f"{medal} {username}: {count} раз - {level}\n"
     else:
-        response += "💪 *ТОП РАБОТЯГ:*\nПока нет данных за эту неделю\n"
+        response += "💪 *Топ работяг (неделя):*\nПока нет данных\n"
     
-    response += f"\n📅 *Период:* {week_range}\n"
-    response += "🔄 *Каждый понедельник статистика обнуляется*"
+    response += "\n" + "="*40 + "\n\n"
+    
+    # ОБЩАЯ СТАТИСТИКА (ВСЕ ВРЕМЯ)
+    response += "📊 *ОБЩАЯ СТАТИСТИКА (все время)*\n\n"
+    
+    # Общий топ курильщиков
+    if stats_yes:
+        response += "🚬 *Топ курильщиков (все время):*\n"
+        overall_smoker_top = get_grouped_top(stats_yes, get_smoker_level)
+        for place, username, count, level in overall_smoker_top:
+            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(place, "🏅")
+            response += f"{medal} {username}: {count} раз - {level}\n"
+    else:
+        response += "🚬 *Топ курильщиков (все время):*\nПока нет данных\n"
+    
+    response += "\n"
+    
+    # Общий топ работяг
+    if stats_no:
+        response += "💪 *Топ работяг (все время):*\n"
+        overall_worker_top = get_grouped_top(stats_no, get_worker_level)
+        for place, username, count, level in overall_worker_top:
+            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(place, "🏅")
+            response += f"{medal} {username}: {count} раз - {level}\n"
+    else:
+        response += "💪 *Топ работяг (все время):*\nПока нет данных\n"
+    
+    response += f"\n🔄 *Недельная статистика обнуляется каждый понедельник*"
     
     await update.message.reply_text(response, parse_mode='Markdown')
 
@@ -1238,7 +1265,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("/stats", "Общая статистика перекуров"),
         ("/stats_detailed", "Детальная статистика с графиками"),
         ("/me", "Твоя персональная статистика с графиками"),
-        ("/top", "Топ курильщиков и работяг (текущая неделя)"),
+        ("/top", "Топ курильщиков и работяг (неделя + общая)"),
         ("/help", "Показать все команды"),
         ("/time", "Проверить время сервера"),
         ("/reset", "Сброс статистики (только админ)"),
