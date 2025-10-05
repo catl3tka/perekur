@@ -121,7 +121,7 @@ consecutive_no = defaultdict(int)
 consecutive_button_press = defaultdict(int)
 last_button_press_time = defaultdict(lambda: datetime.min)
 achievements_unlocked = defaultdict(set)
-successful_polls = []  # Успешные перекуры (опросы с хотя бы одним голосом)
+successful_polls = []  # Успешные перекуры (опросы с хотя бы одним голосом "Да")
 user_levels = defaultdict(dict)  # {user_id: {"smoker_level": int, "worker_level": int}}
 
 # --- СИСТЕМА КОНТЕНТА ДНЯ ---
@@ -344,7 +344,7 @@ def save_data():
         "achievements_unlocked": {str(uid): list(achs) for uid, achs in achievements_unlocked.items()},
         "successful_polls": [t.isoformat() for t in successful_polls],
         "user_levels": {str(uid): levels for uid, levels in user_levels.items()},
-        # СИСТЕМА КОНТЕНТА: сохраняем только asked_today, content_submissions не сохраняем (временные данные)
+        # СИСТЕМА КОНТЕНТА: сохраняем только asked_today
         "asked_today": list(asked_today),
     }
     try:
@@ -582,7 +582,7 @@ def get_active_users():
     return list(active_users)
 
 def reset_daily_content():
-    """Сбросить состояние ежедневного контента"""
+    """Сброс состояния ежедневного контента"""
     global asked_today, content_submissions, current_content_author
     asked_today.clear()
     content_submissions.clear()
@@ -939,6 +939,55 @@ async def weekly_summary(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"❌ Ошибка при отправке еженедельных итогов: {e}")
 
+# --- ИСПРАВЛЕННАЯ ЛОГИКА УСПЕШНОГО ПЕРЕКУРА ---
+async def close_poll(context: ContextTypes.DEFAULT_TYPE):
+    """Закрытие опроса и подсчет окончательных результатов"""
+    message_id = context.job.data
+    try:
+        await context.bot.stop_poll(chat_id=GROUP_CHAT_ID, message_id=message_id)
+        
+        # ИСПРАВЛЕНИЕ: Перекур успешен, если есть ХОТЯ БЫ ОДИН голос "Да"
+        yes_voters = [uid for uid, ans in poll_votes.items() if ans == "Да, конечно"]
+        
+        if yes_voters:  # Если есть хотя бы один "Да" - перекур успешен!
+            successful_polls.append(datetime.now())
+            
+            # Добавляем окончательные голоса в статистику (только последние голоса)
+            for user_id, answer in poll_votes.items():
+                sessions.append((datetime.now(), user_id, answer))
+                
+                # Обновляем счетчики статистики
+                if answer == "Да, конечно":
+                    stats_yes[user_id] += 1
+                    consecutive_yes[user_id] += 1
+                    consecutive_no[user_id] = 0
+                elif answer == "Нет":
+                    stats_no[user_id] += 1
+                    consecutive_no[user_id] += 1
+                    consecutive_yes[user_id] = 0
+                
+                # Проверяем другие ачивки и уровни
+                await check_achievements(user_id, context)
+            
+            save_data()
+            logger.info(f"✅ Опрос закрыт. Успешный перекур! Голосов 'Да': {len(yes_voters)}")
+            
+            # Ачивка "Один в курилке воин" - только один ответ "Да"
+            if len(yes_voters) == 1:
+                await give_achievement(yes_voters[0], context, "Один в курилке воин 🏹")
+            
+            # НОВАЯ АЧИВКА: "В соло тащу на себе завод" - только один ответ "Нет"
+            no_voters = [uid for uid, ans in poll_votes.items() if ans == "Нет"]
+            if len(no_voters) == 1:
+                await give_achievement(no_voters[0], context, "В соло тащу на себе завод 🏭")
+                
+        else:
+            logger.info(f"📭 Опрос закрыт. Голосов 'Да' нет, перекур не состоялся")
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка при закрытии опроса: {e}")
+
+# --- РАСПИСАНИЕ ПО ЕКАТЕРИНБУРГУ (YEKT = UTC + 5) ---
 def schedule_weekly_summary(application):
     """Запланировать еженедельное подведение итогов"""
     job_queue = application.job_queue
@@ -947,21 +996,15 @@ def schedule_weekly_summary(application):
         logger.error("❌ Job queue недоступна!")
         return
     
-    # Запускаем каждую пятницу в 16:45
+    # Еженедельные итоги: пятница 16:45 по Екатеринбургу = 11:45 UTC
     job_queue.run_daily(
         weekly_summary,
-        time=time(hour=16, minute=45),
-        days=(4,),  # 4 = пятница (понедельник=0, воскресенье=6)
+        time=time(hour=11, minute=45),  # 11:45 UTC = 16:45 Екатеринбург
+        days=(4,),  # 4 = пятница
         name="weekly_summary"
     )
     
-    logger.info("✅ Еженедельные итоги запланированы на пятницу 16:45")
-    
-    # Логируем все запланированные задачи для отладки
-    jobs = job_queue.jobs()
-    logger.info(f"📋 Запланировано задач: {len(jobs)}")
-    for job in jobs:
-        logger.info(f"📝 Задача: {job.name}")
+    logger.info("✅ Еженедельные итоги запланированы на пятницу 16:45 по Екатеринбургу")
 
 def schedule_daily_content(application):
     """Запланировать ежедневные задачи для системы контента"""
@@ -971,39 +1014,58 @@ def schedule_daily_content(application):
         logger.error("❌ Job queue недоступна для системы контента!")
         return
     
-    # 08:30 - первый запрос
+    # 08:30 по Екатеринбургу = 03:30 UTC
     job_queue.run_daily(
         ask_for_content,
-        time=time(hour=8, minute=30),
+        time=time(hour=3, minute=30),
         days=(0, 1, 2, 3, 4),  # Пн-Пт
         name="content_first_request"
     )
     
-    # 09:30 - повторный запрос, если первый не ответил
+    # 09:30 по Екатеринбургу = 04:30 UTC
     job_queue.run_daily(
         lambda context: ask_for_content(context),
-        time=time(hour=9, minute=30),
+        time=time(hour=4, minute=30),
         days=(0, 1, 2, 3, 4),
         name="content_second_request"
     )
     
-    # 10:00 - публикация контента
+    # 10:00 по Екатеринбургу = 05:00 UTC
     job_queue.run_daily(
         publish_daily_content,
-        time=time(hour=10, minute=0),
+        time=time(hour=5, minute=0),
         days=(0, 1, 2, 3, 4),
         name="content_publish"
     )
     
-    # 00:00 - сброс состояния
+    # 00:00 по Екатеринбургу = 19:00 UTC (предыдущего дня)
     job_queue.run_daily(
         lambda context: reset_daily_content(),
-        time=time(hour=0, minute=0),
-        days=(0, 1, 2, 3, 4, 5, 6),
+        time=time(hour=19, minute=0),
+        days=(0, 1, 2, 3, 4, 5, 6),  # Каждый день
         name="content_reset"
     )
     
-    logger.info("✅ Система 'Контент дня' запланирована")
+    logger.info("✅ Система 'Контент дня' запланирована по екатеринбургскому времени")
+
+# --- КОМАНДА ДЛЯ ПРОВЕРКИ ВРЕМЕНИ ---
+async def check_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверить время сервера и екатеринбургское время"""
+    now_utc = datetime.utcnow()
+    now_ekt = now_utc + timedelta(hours=5)  # YEKT = UTC + 5
+    
+    await update.message.reply_text(
+        f"⏰ *Текущее время:*\n"
+        f"🖥️ Сервер (UTC): {now_utc.strftime('%H:%M %d.%m.%Y')}\n"
+        f"🏔️ Екатеринбург (YEKT): {now_ekt.strftime('%H:%M %d.%m.%Y')}\n\n"
+        f"📋 *Расписание по Екатеринбургу:*\n"
+        f"• 🕣 08:30 - Запрос контента\n"
+        f"• 🕤 09:30 - Повторный запрос\n"
+        f"• 🕙 10:00 - Публикация контента\n"
+        f"• 🕛 00:00 - Сброс состояния\n"
+        f"• 🕟 16:45 - Итоги недели (пт)",
+        parse_mode='Markdown'
+    )
 
 # --- ТЕСТИРОВАНИЕ ---
 async def test_weekly_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1161,7 +1223,8 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /workers_top - топ работяг
 /test_weekly - тест еженедельных итогов (админ)
 /test_content - тест системы контента (админ)
-/jobs - показать запланированные задачи (админ)"""
+/jobs - показать запланированные задачи (админ)
+/time - проверить время сервера"""
     
     await update.message.reply_text(text)
 
@@ -1320,55 +1383,6 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     logger.info(f"Пользователь {usernames[user_id]} проголосовал: {selected_option} (временный голос)")
 
-async def close_poll(context: ContextTypes.DEFAULT_TYPE):
-    """Закрытие опроса и подсчет окончательных результатов"""
-    message_id = context.job.data
-    try:
-        await context.bot.stop_poll(chat_id=GROUP_CHAT_ID, message_id=message_id)
-        
-        # ИСПРАВЛЕНИЕ: Считаем перекур успешным только после закрытия опроса
-        # и только если есть хотя бы один окончательный голос
-        if poll_votes:  # Если есть голоса в этом опросе
-            successful_polls.append(datetime.now())
-            
-            # Добавляем окончательные голоса в статистику (только последние голоса)
-            for user_id, answer in poll_votes.items():
-                sessions.append((datetime.now(), user_id, answer))
-                
-                # Обновляем счетчики статистики
-                if answer == "Да, конечно":
-                    stats_yes[user_id] += 1
-                    consecutive_yes[user_id] += 1
-                    consecutive_no[user_id] = 0
-                elif answer == "Нет":
-                    stats_no[user_id] += 1
-                    consecutive_no[user_id] += 1
-                    consecutive_yes[user_id] = 0
-                
-                # Проверяем другие ачивки и уровни
-                await check_achievements(user_id, context)
-            
-            save_data()
-            logger.info(f"Опрос закрыт. Успешный перекур! Голосов: {len(poll_votes)}")
-            
-            # Проверяем ачивки за одиночные ответы
-            yes_voters = [uid for uid, ans in poll_votes.items() if ans == "Да, конечно"]
-            no_voters = [uid for uid, ans in poll_votes.items() if ans == "Нет"]
-            
-            # Ачивка "Один в курилке воин" - только один ответ "Да"
-            if len(yes_voters) == 1:
-                await give_achievement(yes_voters[0], context, "Один в курилке воин 🏹")
-            
-            # НОВАЯ АЧИВКА: "В соло тащу на себе завод" - только один ответ "Нет"
-            if len(no_voters) == 1:
-                await give_achievement(no_voters[0], context, "В соло тащу на себе завод 🏭")
-                
-        else:
-            logger.info(f"Опрос закрыт. Голосов нет, перекур не состоялся")
-            
-    except Exception as e:
-        logger.error(f"Ошибка при закрытии опроса: {e}")
-
 async def send_common_poll(context: ContextTypes.DEFAULT_TYPE):
     """Создание общего опроса"""
     global active_poll_id, active_poll_options, last_poll_time, poll_votes
@@ -1463,6 +1477,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("/test_weekly", "Тест еженедельных итогов (админ)"),
         ("/test_content", "Тест системы контента (админ)"),
         ("/jobs", "Показать запланированные задачи (админ)"),
+        ("/time", "Проверить время сервера"),
     ]
     text = "📖 Доступные команды:\n\n" + "\n".join([f"{cmd} — {desc}" for cmd, desc in commands])
     await update.message.reply_text(text)
@@ -1514,6 +1529,7 @@ def main():
         app.add_handler(CommandHandler("test_weekly", test_weekly_summary))
         app.add_handler(CommandHandler("test_content", test_content_system))
         app.add_handler(CommandHandler("jobs", show_scheduled_jobs))
+        app.add_handler(CommandHandler("time", check_time))
 
         # Сообщения - ОБНОВЛЕННЫЙ ОБРАБОТЧИК (поддерживает ВСЕ типы сообщений)
         app.add_handler(MessageHandler(
