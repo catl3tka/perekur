@@ -1222,9 +1222,128 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("/me", "Твоя персональная статистика с графиками"),
         ("/top", "Топ курильщиков и работяг"),
         ("/help", "Показать все команды"),
+        ("/time", "Проверить время сервера"),
+        ("/reset", "Сброс статистики (только админ)"),
+        ("/test_weekly", "Тест еженедельных итогов (админ)"),
+        ("/test_content", "Тест системы контента (админ)"),
+        ("/jobs", "Показать запланированные задачи (админ)"),
     ]
     text = "📖 Доступные команды:\n\n" + "\n".join([f"{cmd} — {desc}" for cmd, desc in commands])
     await update.message.reply_text(text)
+
+# --- Дополнительные команды ---
+async def check_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверить время сервера и екатеринбургское время"""
+    now_utc = datetime.utcnow()
+    now_ekt = now_utc + timedelta(hours=5)  # YEKT = UTC + 5
+    
+    await update.message.reply_text(
+        f"⏰ *Текущее время:*\n"
+        f"🖥️ Сервер (UTC): {now_utc.strftime('%H:%M %d.%m.%Y')}\n"
+        f"🏔️ Екатеринбург (YEKT): {now_ekt.strftime('%H:%M %d.%m.%Y')}\n\n"
+        f"📋 *Расписание по Екатеринбургу:*\n"
+        f"• 🕣 08:30 - Запрос контента\n"
+        f"• 🕤 09:30 - Повторный запрос\n"
+        f"• 🕙 10:00 - Публикация контента\n"
+        f"• 🕛 00:00 - Сброс состояния\n"
+        f"• 🕟 16:45 - Итоги недели (пт)",
+        parse_mode='Markdown'
+    )
+
+async def reset_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сброс статистики (только для админа)"""
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ У тебя нет прав для сброса статистики.")
+        return
+    
+    stats_yes.clear()
+    stats_no.clear()
+    stats_stickers.clear()
+    stats_photos.clear()
+    usernames.clear()
+    sessions.clear()
+    consecutive_yes.clear()
+    consecutive_no.clear()
+    consecutive_button_press.clear()
+    last_button_press_time.clear()
+    achievements_unlocked.clear()
+    successful_polls.clear()
+    user_levels.clear()
+    content_submissions.clear()
+    asked_today.clear()
+    
+    save_data()
+    await update.message.reply_text("🔄 Статистика и ачивки сброшены!")
+
+async def test_weekly_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Тестовая команда для запуска еженедельных итогов"""
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ У тебя нет прав для этой команды.")
+        return
+    
+    logger.info("🔧 Ручной запуск еженедельных итогов через команду /test_weekly")
+    await update.message.reply_text("🔧 Запускаю еженедельные итоги вручную...")
+    await friday_rewards(context)
+    await update.message.reply_text("✅ Еженедельные итоги отправлены вручную")
+
+async def test_content_system(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Тестовая команда для системы контента"""
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ У тебя нет прав для этой команды.")
+        return
+    
+    logger.info("🔧 Ручной запуск системы контента")
+    await update.message.reply_text("🔧 Запускаю систему контента...")
+    await ask_for_content(context, user_id)
+
+async def show_scheduled_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать запланированные задачи"""
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ У тебя нет прав для этой команды.")
+        return
+    
+    job_queue = context.application.job_queue
+    if job_queue is None:
+        await update.message.reply_text("❌ Job queue недоступна")
+        return
+    
+    jobs = job_queue.jobs()
+    if not jobs:
+        await update.message.reply_text("📭 Нет запланированных задач")
+        return
+    
+    message = "📋 Запланированные задачи:\n\n"
+    for i, job in enumerate(jobs, 1):
+        message += f"{i}. {job.name}\n"
+    
+    await update.message.reply_text(message)
+
+# --- Вспомогательные функции для планировщика ---
+async def daily_content_reminder(context: ContextTypes.DEFAULT_TYPE):
+    """Напоминание о контенте дня в 9:30"""
+    # Используем екатеринбургское время
+    now_ekt = datetime.utcnow() + timedelta(hours=5)
+    
+    # Проверяем рабочий день и время
+    if now_ekt.weekday() >= 5 or now_ekt.hour != 9 or now_ekt.minute != 30:
+        return
+    
+    logger.info("📝 Напоминание о контенте дня")
+    
+    try:
+        await context.bot.send_message(
+            chat_id=GROUP_CHAT_ID,
+            text="🎭 *Напоминание!*\n\n"
+                 "Сегодня в 10:00 будет опубликован *анонимный контент дня*!\n\n"
+                 "Если ты был выбран сегодняшним автором - не забудь отправить свой контент!",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"❌ Ошибка при отправке напоминания: {e}")
 
 # --- Основные команды ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1310,6 +1429,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await check_achievements(user_id, context)
         save_data()
 
+# --- Обработчик ошибок ---
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик ошибок"""
+    logger.error(f"Ошибка при обработке обновления {update}: {context.error}", exc_info=context.error)
+    
+    try:
+        # Пытаемся отправить сообщение об ошибке пользователю
+        if update and update.effective_message:
+            await update.effective_message.reply_text(
+                "❌ Произошла ошибка при обработке запроса. Попробуйте позже."
+            )
+    except Exception as e:
+        logger.error(f"Ошибка при отправке сообщения об ошибке: {e}")
+
 # --- Основная функция ---
 def main():
     load_data()
@@ -1323,6 +1456,11 @@ def main():
     application.add_handler(CommandHandler("me", show_me))
     application.add_handler(CommandHandler("top", show_top))
     application.add_handler(CommandHandler("help", show_help))
+    application.add_handler(CommandHandler("time", check_time))
+    application.add_handler(CommandHandler("reset", reset_stats))
+    application.add_handler(CommandHandler("test_weekly", test_weekly_summary))
+    application.add_handler(CommandHandler("test_content", test_content_system))
+    application.add_handler(CommandHandler("jobs", show_scheduled_jobs))
     
     # Обработчики сообщений
     application.add_handler(MessageHandler(filters.Regex("^Курить 🚬$"), handle_button))
@@ -1338,47 +1476,50 @@ def main():
     application.add_handler(PollAnswerHandler(handle_poll_answer))
     application.add_handler(MessageHandler(filters.POLL, handle_poll_update))
     
+    # ДОБАВЛЕНО: Регистрация обработчика ошибок
+    application.add_error_handler(error_handler)
+    
     # Планировщик задач
     job_queue = application.job_queue
     
     # Ежедневный сброс состояния контента в 00:01 ЕКБ (19:01 UTC)
     job_queue.run_daily(
-        lambda context: reset_daily_content(),
+        reset_daily_content,
         time=time(hour=19, minute=1, second=0),  # 00:01 ЕКБ
         days=(0, 1, 2, 3, 4, 5, 6)
     )
     
     # Запрос контента в 9:00 ЕКБ (4:00 UTC)
     job_queue.run_daily(
-        lambda context: application.create_task(ask_for_content(context)),
+        ask_for_content,
         time=time(hour=4, minute=0, second=0),  # 9:00 ЕКБ
         days=(0, 1, 2, 3, 4)  # Пн-Пт
     )
     
     # Напоминание о контенте в 9:30 ЕКБ (4:30 UTC)
     job_queue.run_daily(
-        lambda context: application.create_task(daily_content_reminder(context)),
+        daily_content_reminder,
         time=time(hour=4, minute=30, second=0),  # 9:30 ЕКБ
         days=(0, 1, 2, 3, 4)  # Пн-Пт
     )
     
     # Публикация контента в 10:00 ЕКБ (5:00 UTC)
     job_queue.run_daily(
-        lambda context: application.create_task(publish_daily_content(context)),
+        publish_daily_content,
         time=time(hour=5, minute=0, second=0),  # 10:00 ЕКБ
         days=(0, 1, 2, 3, 4)  # Пн-Пт
     )
     
     # Пятничное награждение в 17:00 ЕКБ (12:00 UTC)
     job_queue.run_daily(
-        lambda context: application.create_task(friday_rewards(context)),
+        friday_rewards,
         time=time(hour=12, minute=0, second=0),  # 17:00 ЕКБ
         days=(4,)  # Только пятница
     )
     
     # Сохранение данных каждые 5 минут
     job_queue.run_repeating(
-        lambda context: save_data(),
+        save_data,
         interval=300,
         first=10
     )
