@@ -8,10 +8,10 @@ import random
 import matplotlib.pyplot as plt
 import numpy as np
 
-from telegram import Update, ReplyKeyboardMarkup, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, InputFile
 from telegram.ext import (
     Application, CommandHandler, ContextTypes,
-    MessageHandler, filters, PollAnswerHandler, CallbackQueryHandler
+    MessageHandler, filters, PollAnswerHandler
 )
 
 # --- Настройки ---
@@ -124,12 +124,10 @@ achievements_unlocked = defaultdict(set)
 successful_polls = []  # Успешные перекуры (опросы с хотя бы одним голосом)
 user_levels = defaultdict(dict)  # {user_id: {"smoker_level": int, "worker_level": int}}
 
-# --- НОВОЕ: Система "Мем или анекдот дня" ---
-content_requests = {}  # {user_id: {"message_id": int, "content_type": str}}
-daily_content = {}  # {date: {"content": str, "media": file, "content_type": str}}
+# --- СИСТЕМА КОНТЕНТА ДНЯ ---
+content_submissions = {}  # {user_id: {"message": message, "date": datetime}}
 asked_today = set()  # Пользователи, которых уже спрашивали сегодня
 current_content_author = None  # Текущий автор контента
-content_waiting_for_media = {}  # {user_id: {"content_type": str, "text": str}}
 
 # --- Вспомогательные функции для графиков ---
 def setup_plot_style():
@@ -346,10 +344,8 @@ def save_data():
         "achievements_unlocked": {str(uid): list(achs) for uid, achs in achievements_unlocked.items()},
         "successful_polls": [t.isoformat() for t in successful_polls],
         "user_levels": {str(uid): levels for uid, levels in user_levels.items()},
-        # НОВОЕ: Сохраняем данные системы контента
-        "daily_content": {date.isoformat(): content for date, content in daily_content.items()},
+        # СИСТЕМА КОНТЕНТА: сохраняем только asked_today, content_submissions не сохраняем (временные данные)
         "asked_today": list(asked_today),
-        "content_waiting_for_media": {str(uid): data for uid, data in content_waiting_for_media.items()},
     }
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
@@ -362,7 +358,7 @@ def load_data():
     global stats_yes, stats_no, stats_stickers, stats_photos
     global usernames, sessions, consecutive_yes, consecutive_no, consecutive_button_press
     global last_button_press_time, achievements_unlocked, successful_polls, user_levels
-    global daily_content, asked_today, content_waiting_for_media
+    global asked_today
     
     if not os.path.exists(DATA_FILE):
         logger.info("Файл данных не найден, начинаем с чистого листа")
@@ -384,10 +380,8 @@ def load_data():
         successful_polls.extend([datetime.fromisoformat(t) for t in data.get("successful_polls", [])])
         user_levels.update({int(uid): levels for uid, levels in data.get("user_levels", {}).items()})
         
-        # НОВОЕ: Загружаем данные системы контента
-        daily_content.update({datetime.fromisoformat(date): content for date, content in data.get("daily_content", {}).items()})
+        # СИСТЕМА КОНТЕНТА: загружаем asked_today
         asked_today.update(data.get("asked_today", []))
-        content_waiting_for_media.update({int(uid): data for uid, data in data.get("content_waiting_for_media", {}).items()})
         
         last_button_press_time_data = data.get("last_button_press_time", {})
         for k, v in last_button_press_time_data.items():
@@ -575,6 +569,233 @@ def get_grouped_top(stats_dict, level_func):
     
     return result
 
+# --- СИСТЕМА КОНТЕНТА ДНЯ ---
+def get_active_users():
+    """Получить список активных пользователей за последние 7 дней"""
+    week_ago = datetime.now() - timedelta(days=7)
+    active_users = set()
+    
+    for t, uid, _ in sessions:
+        if t >= week_ago:
+            active_users.add(uid)
+    
+    return list(active_users)
+
+def reset_daily_content():
+    """Сбросить состояние ежедневного контента"""
+    global asked_today, content_submissions, current_content_author
+    asked_today.clear()
+    content_submissions.clear()
+    current_content_author = None
+    logger.info("🔄 Состояние ежедневного контента сброшено")
+
+async def ask_for_content(context: ContextTypes.DEFAULT_TYPE, user_id: int = None):
+    """Запросить контент у пользователя"""
+    global current_content_author
+    
+    # Проверяем рабочий день (Пн-Пт)
+    today = datetime.now()
+    if today.weekday() >= 5:  # 5=Сб, 6=Вс
+        logger.info("📅 Сегодня выходной, пропускаем запрос контента")
+        return
+    
+    # Если пользователь не указан, выбираем случайного
+    if user_id is None:
+        active_users = get_active_users()
+        if not active_users:
+            logger.info("👥 Нет активных пользователей для запроса контента")
+            return
+        
+        # Исключаем уже опрошенных сегодня
+        available_users = [uid for uid in active_users if uid not in asked_today]
+        if not available_users:
+            logger.info("📝 Все активные пользователи уже были опрошены сегодня")
+            return
+        
+        user_id = random.choice(available_users)
+    
+    # Сохраняем текущего автора
+    current_content_author = user_id
+    asked_today.add(user_id)
+    
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="🎭 *Привет! Ты сегодняшний счастливчик!*\n\n"
+                 "Отправь мне любой контент для *анонимной* публикации в общем чате:\n"
+                 "• 📸 Картинка/мем\n"
+                 "• 🎬 Видео/GIF\n" 
+                 "• 🎵 Музыка/аудио\n"
+                 "• 📝 Текст (анекдот, шутка, факт)\n"
+                 "• 📎 Файл\n\n"
+                 "Я просто перешлю твой контент в группу *без указания автора*.\n\n"
+                 "Контент будет опубликован в 10:00 ⏰",
+            parse_mode='Markdown'
+        )
+        
+        logger.info(f"📨 Запрос контента отправлен пользователю {user_id}")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при отправке запроса пользователю {user_id}: {e}")
+        # Переходим к следующему пользователю
+        await ask_for_content(context)
+
+async def handle_content_submission(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка любого отправленного контента"""
+    user_id = update.effective_user.id
+    message = update.message
+    
+    # Проверяем, был ли пользователь выбран сегодня для отправки контента
+    if user_id not in asked_today:
+        return
+    
+    today = datetime.now().date()
+    
+    try:
+        # Сохраняем сообщение для последующей публикации
+        content_submissions[user_id] = {
+            "message": message,
+            "date": datetime.now()
+        }
+        
+        # Определяем тип контента для логов
+        content_type = "текст"
+        if message.photo:
+            content_type = "картинка"
+        elif message.video:
+            content_type = "видео" 
+        elif message.audio:
+            content_type = "аудио"
+        elif message.document:
+            content_type = "файл"
+        elif message.animation:
+            content_type = "GIF"
+        elif message.sticker:
+            content_type = "стикер"
+        elif message.voice:
+            content_type = "голосовое сообщение"
+        
+        await message.reply_text(
+            f"✅ Отлично! Твой {content_type} сохранён.\n\n"
+            f"Он будет *анонимно* опубликован в общем чате сегодня в 10:00 🕙\n\n"
+            f"_Никто не узнает, что это был ты_ 😉",
+            parse_mode='Markdown'
+        )
+        
+        logger.info(f"✅ Контент типа '{content_type}' от пользователя {user_id} сохранен")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка при сохранении контента от пользователя {user_id}: {e}")
+        await message.reply_text("❌ Произошла ошибка при сохранении контента.")
+
+async def publish_daily_content(context: ContextTypes.DEFAULT_TYPE):
+    """Публикация ежедневного контента в 10:00"""
+    today = datetime.now().date()
+    
+    # Проверяем рабочий день
+    if datetime.now().weekday() >= 5:
+        return
+    
+    # Ищем контент для публикации
+    content_to_publish = None
+    author_id = None
+    
+    for user_id, submission in content_submissions.items():
+        if submission["date"].date() == today:
+            content_to_publish = submission["message"]
+            author_id = user_id
+            break
+    
+    if content_to_publish and author_id:
+        try:
+            # Пересылаем сообщение в группу (без указания автора)
+            await forward_message_to_group(context, content_to_publish)
+            
+            # Удаляем из временного хранилища
+            del content_submissions[author_id]
+            logger.info(f"✅ Контент от пользователя {author_id} опубликован")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка при публикации контента: {e}")
+    else:
+        logger.info("📭 Контент для публикации не найден")
+
+async def forward_message_to_group(context: ContextTypes.DEFAULT_TYPE, message):
+    """Переслать сообщение в группу с анонимной подписью"""
+    try:
+        # Определяем тип контента для заголовка
+        content_type = "Контент"
+        if message.photo:
+            content_type = "Мем дня" 
+        elif message.video:
+            content_type = "Видео дня"
+        elif message.audio:
+            content_type = "Музыка дня"
+        elif message.text:
+            content_type = "Анекдот дня"
+        elif message.document:
+            content_type = "Файл дня"
+        elif message.animation:
+            content_type = "GIF дня"
+        
+        # Сначала отправляем заголовок
+        await context.bot.send_message(
+            chat_id=GROUP_CHAT_ID,
+            text=f"🎭 *{content_type}!*\n\n_Прислано анонимно_ 👻",
+            parse_mode='Markdown'
+        )
+        
+        # Затем пересылаем сам контент
+        if message.text:
+            await context.bot.send_message(
+                chat_id=GROUP_CHAT_ID,
+                text=message.text
+            )
+        elif message.photo:
+            await context.bot.send_photo(
+                chat_id=GROUP_CHAT_ID,
+                photo=message.photo[-1].file_id,
+                caption=message.caption
+            )
+        elif message.video:
+            await context.bot.send_video(
+                chat_id=GROUP_CHAT_ID,
+                video=message.video.file_id,
+                caption=message.caption
+            )
+        elif message.audio:
+            await context.bot.send_audio(
+                chat_id=GROUP_CHAT_ID,
+                audio=message.audio.file_id,
+                caption=message.caption
+            )
+        elif message.document:
+            await context.bot.send_document(
+                chat_id=GROUP_CHAT_ID,
+                document=message.document.file_id,
+                caption=message.caption
+            )
+        elif message.animation:  # GIF
+            await context.bot.send_animation(
+                chat_id=GROUP_CHAT_ID,
+                animation=message.animation.file_id,
+                caption=message.caption
+            )
+        elif message.voice:
+            await context.bot.send_voice(
+                chat_id=GROUP_CHAT_ID,
+                voice=message.voice.file_id
+            )
+        elif message.sticker:
+            await context.bot.send_sticker(
+                chat_id=GROUP_CHAT_ID,
+                sticker=message.sticker.file_id
+            )
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка при пересылке сообщения: {e}")
+        raise e
+
 # --- НОВЫЕ ФУНКЦИИ: Топ работяг и еженедельные итоги ---
 async def show_workers_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Топ работяг по ответам 'Нет'"""
@@ -742,214 +963,6 @@ def schedule_weekly_summary(application):
     for job in jobs:
         logger.info(f"📝 Задача: {job.name}")
 
-# --- НОВАЯ СИСТЕМА: Мем или анекдот дня ---
-def get_active_users():
-    """Получить список активных пользователей за последние 7 дней"""
-    week_ago = datetime.now() - timedelta(days=7)
-    active_users = set()
-    
-    for t, uid, _ in sessions:
-        if t >= week_ago:
-            active_users.add(uid)
-    
-    return list(active_users)
-
-def reset_daily_content():
-    """Сбросить состояние ежедневного контента"""
-    global asked_today, content_waiting_for_media, current_content_author
-    asked_today.clear()
-    content_waiting_for_media.clear()
-    current_content_author = None
-    logger.info("🔄 Состояние ежедневного контента сброшено")
-
-async def ask_for_content(context: ContextTypes.DEFAULT_TYPE, user_id: int = None):
-    """Запросить контент у пользователя"""
-    global current_content_author
-    
-    # Проверяем рабочий день (Пн-Пт)
-    today = datetime.now()
-    if today.weekday() >= 5:  # 5=Сб, 6=Вс
-        logger.info("📅 Сегодня выходной, пропускаем запрос контента")
-        return
-    
-    # Если пользователь не указан, выбираем случайного
-    if user_id is None:
-        active_users = get_active_users()
-        if not active_users:
-            logger.info("👥 Нет активных пользователей для запроса контента")
-            return
-        
-        # Исключаем уже опрошенных сегодня
-        available_users = [uid for uid in active_users if uid not in asked_today]
-        if not available_users:
-            logger.info("📝 Все активные пользователи уже были опрошены сегодня")
-            return
-        
-        user_id = random.choice(available_users)
-    
-    # Сохраняем текущего автора
-    current_content_author = user_id
-    asked_today.add(user_id)
-    
-    # Создаем клавиатуру с выбором типа контента
-    keyboard = [
-        [InlineKeyboardButton("📸 Мем с картинкой", callback_data="content_meme")],
-        [InlineKeyboardButton("📝 Текст (анекдот/шутка)", callback_data="content_text")],
-        [InlineKeyboardButton("⏭️ Пропустить", callback_data="content_skip")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    try:
-        message = await context.bot.send_message(
-            chat_id=user_id,
-            text="🎭 *Мем или анекдот дня!*\n\nВыбери тип контента для отправки в группу (анонимно):",
-            reply_markup=reply_markup,
-            parse_mode='Markdown'
-        )
-        
-        content_requests[user_id] = {
-            "message_id": message.message_id,
-            "content_type": None
-        }
-        
-        logger.info(f"📨 Запрос контента отправлен пользователю {user_id}")
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка при отправке запроса пользователю {user_id}: {e}")
-        # Переходим к следующему пользователю
-        await ask_for_content(context)
-
-async def handle_content_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка выбора типа контента"""
-    query = update.callback_query
-    user_id = query.from_user.id
-    data = query.data
-    
-    await query.answer()
-    
-    if data == "content_skip":
-        # Пользователь пропускает - переходим к следующему
-        await query.edit_message_text("✅ Пропущено. Передаем следующему участнику...")
-        logger.info(f"⏭️ Пользователь {user_id} пропустил создание контента")
-        await ask_for_content(context)
-        return
-    
-    content_type = "мем" if data == "content_meme" else "текст"
-    content_requests[user_id]["content_type"] = content_type
-    
-    instruction = ""
-    if data == "content_meme":
-        instruction = "📸 Отправь картинку с подписью (или просто картинку):"
-    else:
-        instruction = "📝 Напиши текст (анекдот, шутку или интересный факт):"
-    
-    await query.edit_message_text(
-        f"🎭 Выбран тип: {content_type}\n\n{instruction}\n\n"
-        f"⚠️ Контент будет опубликован анонимно в 10:00"
-    )
-    
-    logger.info(f"✅ Пользователь {user_id} выбрал тип контента: {content_type}")
-
-async def handle_content_submission(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка отправленного контента"""
-    user_id = update.effective_user.id
-    
-    # Проверяем, ожидаем ли мы контент от этого пользователя
-    if user_id not in content_requests or not content_requests[user_id]["content_type"]:
-        return
-    
-    content_type = content_requests[user_id]["content_type"]
-    today = datetime.now().date()
-    
-    try:
-        if content_type == "мем" and (update.message.photo or update.message.text):
-            # Обработка мема (картинка + текст)
-            if update.message.photo:
-                # Пользователь отправил картинку
-                photo_file = await update.message.photo[-1].get_file()
-                photo_bytes = await photo_file.download_as_bytearray()
-                caption = update.message.caption or ""
-                
-                content_waiting_for_media[user_id] = {
-                    "content_type": "мем",
-                    "text": caption,
-                    "media": photo_bytes,
-                    "media_type": "photo"
-                }
-                
-                if caption:
-                    await update.message.reply_text("✅ Картинка и подпись сохранены! Контент будет опубликован в 10:00.")
-                else:
-                    await update.message.reply_text("✅ Картинка сохранена! Контент будет опубликован в 10:00.")
-                
-            elif update.message.text:
-                # Пользователь отправил только текст - ждем картинку
-                content_waiting_for_media[user_id] = {
-                    "content_type": "мем", 
-                    "text": update.message.text,
-                    "media": None,
-                    "media_type": None
-                }
-                await update.message.reply_text("📝 Текст сохранен! Теперь отправь картинку для мема.")
-            
-        elif content_type == "текст" and update.message.text:
-            # Обработка текстового контента
-            if len(update.message.text) < 5:
-                await update.message.reply_text("❌ Текст слишком короткий. Минимум 5 символов.")
-                return
-            
-            daily_content[today] = {
-                "content": update.message.text,
-                "media": None,
-                "content_type": "текст",
-                "author": user_id
-            }
-            
-            await update.message.reply_text("✅ Текст сохранен! Контент будет опубликован в 10:00.")
-            
-            # Удаляем запрос
-            del content_requests[user_id]
-            save_data()
-            
-        logger.info(f"✅ Контент от пользователя {user_id} сохранен")
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка при сохранении контента от пользователя {user_id}: {e}")
-        await update.message.reply_text("❌ Произошла ошибка при сохранении контента.")
-
-async def publish_daily_content(context: ContextTypes.DEFAULT_TYPE):
-    """Публикация ежедневного контента в 10:00"""
-    today = datetime.now().date()
-    
-    # Проверяем рабочий день
-    if datetime.now().weekday() >= 5:
-        return
-    
-    if today in daily_content:
-        content_data = daily_content[today]
-        
-        try:
-            if content_data["content_type"] == "текст":
-                await context.bot.send_message(
-                    chat_id=GROUP_CHAT_ID,
-                    text=f"🎭 *Контент дня!*\n\n{content_data['content']}\n\n_Прислано анонимно_",
-                    parse_mode='Markdown'
-                )
-            elif content_data["content_type"] == "мем" and content_data["media"]:
-                await context.bot.send_photo(
-                    chat_id=GROUP_CHAT_ID,
-                    photo=content_data["media"],
-                    caption=f"🎭 *Мем дня!*\n\n{content_data.get('text', '')}\n\n_Прислано анонимно_",
-                    parse_mode='Markdown'
-                )
-            
-            logger.info("✅ Ежедневный контент опубликован")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка при публикации контента: {e}")
-    else:
-        logger.info("📭 Контент для публикации не найден")
-
 def schedule_daily_content(application):
     """Запланировать ежедневные задачи для системы контента"""
     job_queue = application.job_queue
@@ -990,7 +1003,7 @@ def schedule_daily_content(application):
         name="content_reset"
     )
     
-    logger.info("✅ Система 'Мем или анекдот дня' запланирована")
+    logger.info("✅ Система 'Контент дня' запланирована")
 
 # --- ТЕСТИРОВАНИЕ ---
 async def test_weekly_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1402,6 +1415,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = msg.from_user.id
     usernames[user_id] = msg.from_user.full_name
 
+    # Обработка контента для анонимной публикации (должна быть ПЕРВОЙ проверкой)
+    if user_id in asked_today:
+        await handle_content_submission(update, context)
+        return
+
+    # Старая логика для других функций бота
     if msg.text == "Курить 🚬":
         now = datetime.now()
         
@@ -1467,9 +1486,8 @@ async def reset_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     achievements_unlocked.clear()
     successful_polls.clear()
     user_levels.clear()
-    daily_content.clear()
+    content_submissions.clear()
     asked_today.clear()
-    content_waiting_for_media.clear()
     
     save_data()
     await update.message.reply_text("🔄 Статистика и ачивки сброшены!")
@@ -1497,15 +1515,15 @@ def main():
         app.add_handler(CommandHandler("test_content", test_content_system))
         app.add_handler(CommandHandler("jobs", show_scheduled_jobs))
 
-        # Сообщения
-        app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.Sticker.ALL, handle_message))
+        # Сообщения - ОБНОВЛЕННЫЙ ОБРАБОТЧИК (поддерживает ВСЕ типы сообщений)
+        app.add_handler(MessageHandler(
+            filters.TEXT | filters.PHOTO | filters.VIDEO | filters.AUDIO | 
+            filters.Document.ALL | filters.ANIMATION | filters.VOICE | filters.STICKER, 
+            handle_message
+        ))
 
         # Опросы
         app.add_handler(PollAnswerHandler(handle_poll_answer))
-
-        # НОВОЕ: Обработчики для системы контента
-        app.add_handler(CallbackQueryHandler(handle_content_choice, pattern="^content_"))
-        app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, handle_content_submission))
 
         logger.info("🤖 Бот запускается...")
         
