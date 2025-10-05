@@ -597,6 +597,8 @@ async def get_weekly_winners():
 
 async def weekly_summary(context: ContextTypes.DEFAULT_TYPE):
     """Еженедельное подведение итогов с группировкой по местам"""
+    logger.info("🎉 Функция weekly_summary запущена по расписанию!")
+    
     try:
         top_smokers, top_workers = await get_weekly_winners()
         
@@ -693,14 +695,18 @@ async def weekly_summary(context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
         
-        logger.info("Еженедельные итоги отправлены")
+        logger.info("✅ Еженедельные итоги успешно отправлены")
         
     except Exception as e:
-        logger.error(f"Ошибка при отправке еженедельных итогов: {e}")
+        logger.error(f"❌ Ошибка при отправке еженедельных итогов: {e}")
 
 def schedule_weekly_summary(application):
     """Запланировать еженедельное подведение итогов"""
     job_queue = application.job_queue
+    
+    if job_queue is None:
+        logger.error("❌ Job queue недоступна!")
+        return
     
     # Запускаем каждую пятницу в 16:45
     job_queue.run_daily(
@@ -710,7 +716,51 @@ def schedule_weekly_summary(application):
         name="weekly_summary"
     )
     
-    logger.info("Еженедельные итоги запланированы на пятницу 16:45")
+    logger.info("✅ Еженедельные итоги запланированы на пятницу 16:45")
+    
+    # Логируем все запланированные задачи для отладки
+    jobs = job_queue.jobs()
+    logger.info(f"📋 Запланировано задач: {len(jobs)}")
+    for job in jobs:
+        logger.info(f"📝 Задача: {job.name}, следующее выполнение: {job.next_t}")
+
+# --- ТЕСТИРОВАНИЕ ---
+async def test_weekly_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Тестовая команда для запуска еженедельных итогов"""
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ У тебя нет прав для этой команды.")
+        return
+    
+    logger.info("🔧 Ручной запуск еженедельных итогов через команду /test_weekly")
+    await update.message.reply_text("🔧 Запускаю еженедельные итоги вручную...")
+    await weekly_summary(context)
+    await update.message.reply_text("✅ Еженедельные итоги отправлены вручную")
+
+async def show_scheduled_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать запланированные задачи"""
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ У тебя нет прав для этой команды.")
+        return
+    
+    job_queue = context.application.job_queue
+    if job_queue is None:
+        await update.message.reply_text("❌ Job queue недоступна")
+        return
+    
+    jobs = job_queue.jobs()
+    if not jobs:
+        await update.message.reply_text("📭 Нет запланированных задач")
+        return
+    
+    message = "📋 Запланированные задачи:\n\n"
+    for i, job in enumerate(jobs, 1):
+        message += f"{i}. {job.name}\n"
+        message += f"   Следующий запуск: {job.next_t}\n"
+        message += f"   Интервал: {job.interval}\n\n"
+    
+    await update.message.reply_text(message)
 
 # --- КОМАНДЫ СТАТИСТИКИ ---
 async def show_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -818,7 +868,9 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /stats_detailed - подробная статистика с графиками
 /me - твоя персональная статистика с графиками
 /top - топ курильщиков
-/workers_top - топ работяг"""
+/workers_top - топ работяг
+/test_weekly - тест еженедельных итогов (админ)
+/jobs - показать запланированные задачи (админ)"""
     
     await update.message.reply_text(text)
 
@@ -1111,6 +1163,8 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("/workers_top", "Топ работяг"),
         ("/help", "Показать все команды"),
         ("/reset", "Сброс статистики (только админ)"),
+        ("/test_weekly", "Тест еженедельных итогов (админ)"),
+        ("/jobs", "Показать запланированные задачи (админ)"),
     ]
     text = "📖 Доступные команды:\n\n" + "\n".join([f"{cmd} — {desc}" for cmd, desc in commands])
     await update.message.reply_text(text)
@@ -1157,6 +1211,8 @@ def main():
         app.add_handler(CommandHandler("workers_top", show_workers_top))
         app.add_handler(CommandHandler("help", show_help))
         app.add_handler(CommandHandler("reset", reset_stats))
+        app.add_handler(CommandHandler("test_weekly", test_weekly_summary))
+        app.add_handler(CommandHandler("jobs", show_scheduled_jobs))
 
         # Сообщения
         app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.Sticker.ALL, handle_message))
@@ -1164,14 +1220,15 @@ def main():
         # Опросы
         app.add_handler(PollAnswerHandler(handle_poll_answer))
 
-        # Запланировать еженедельные итоги
+        logger.info("🤖 Бот запускается...")
+        
+        # ПЕРЕНЕСЕМ планировщик ПОСЛЕ создания приложения, но ДО run_polling
         schedule_weekly_summary(app)
-
-        logger.info("Бот запускается...")
+        
         app.run_polling(drop_pending_updates=True)
         
     except Exception as e:
-        logger.error(f"Критическая ошибка при запуске бота: {e}")
+        logger.error(f"❌ Критическая ошибка при запуске бота: {e}")
 
 if __name__ == "__main__":
     main()
