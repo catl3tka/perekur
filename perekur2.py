@@ -129,6 +129,11 @@ content_submissions = {}  # {user_id: {"message": message, "date": datetime}}
 asked_today = set()  # Пользователи, которых уже спрашивали сегодня
 current_content_author = None  # Текущий автор контента
 
+# --- НОВАЯ ЛОГИКА НЕДЕЛЬНОГО ТОПА ---
+weekly_stats_yes = defaultdict(int)  # Статистика "Да" за текущую неделю
+weekly_stats_no = defaultdict(int)   # Статистика "Нет" за текущую неделю
+current_week_key = None  # Ключ текущей недели для автоматического сброса
+
 # --- Вспомогательные функции для графиков ---
 def setup_plot_style():
     """Настройка стиля графиков"""
@@ -316,6 +321,57 @@ def create_statistics_plot():
     
     return buf
 
+# --- НОВЫЕ ФУНКЦИИ ДЛЯ НЕДЕЛЬНОГО ТОПА ---
+def get_current_week_range():
+    """Вычисляет диапазон текущей рабочей недели (понедельник 00:00 - пятница 23:59)"""
+    # Используем екатеринбургское время
+    now_ekt = datetime.utcnow() + timedelta(hours=5)
+    
+    # Находим понедельник текущей недели
+    monday = now_ekt - timedelta(days=now_ekt.weekday())
+    monday = monday.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    # Находим пятницу текущей недели
+    friday = monday + timedelta(days=4)
+    friday = friday.replace(hour=23, minute=59, second=59, microsecond=999999)
+    
+    return monday, friday
+
+def get_week_range_display():
+    """Возвращает строку с диапазоном недели в формате 'дд.мм - дд.мм'"""
+    monday, friday = get_current_week_range()
+    return f"{monday.strftime('%d.%m')} - {friday.strftime('%d.%m')}"
+
+def get_current_week_key():
+    """Возвращает ключ для текущей недели в формате ГГГГ-НЕДЕЛЯ"""
+    monday, _ = get_current_week_range()
+    return monday.strftime('%Y-%W')
+
+def update_weekly_stats():
+    """Обновление недельной статистики на основе текущей недели"""
+    global current_week_key, weekly_stats_yes, weekly_stats_no
+    
+    new_week_key = get_current_week_key()
+    
+    # Если неделя сменилась, сбрасываем статистику
+    if new_week_key != current_week_key:
+        weekly_stats_yes.clear()
+        weekly_stats_no.clear()
+        current_week_key = new_week_key
+        logger.info(f"🔄 Недельная статистика сброшена. Новая неделя: {current_week_key}")
+    
+    # Обновляем статистику текущей недели из сессий
+    monday, friday = get_current_week_range()
+    
+    for t, uid, ans in sessions:
+        # Конвертируем время сессии в ЕКБ для сравнения
+        session_time_ekt = t + timedelta(hours=5)
+        if monday <= session_time_ekt <= friday:
+            if ans == "Да, конечно":
+                weekly_stats_yes[uid] += 1
+            elif ans == "Нет":
+                weekly_stats_no[uid] += 1
+
 # --- Сохранение/загрузка ---
 def create_backup():
     if os.path.exists(DATA_FILE):
@@ -328,7 +384,9 @@ def create_backup():
         except Exception as e:
             logger.error(f"Ошибка при создании бэкапа: {e}")
 
-def save_data():
+# ИСПРАВЛЕННАЯ ФУНКЦИЯ save_data
+def save_data(context=None):
+    """Сохранение данных в JSON файл"""
     create_backup()
     data = {
         "stats_yes": dict(stats_yes),
@@ -346,6 +404,10 @@ def save_data():
         "user_levels": {str(uid): levels for uid, levels in user_levels.items()},
         # СИСТЕМА КОНТЕНТА: сохраняем только asked_today
         "asked_today": list(asked_today),
+        # НЕДЕЛЬНАЯ СТАТИСТИКА
+        "weekly_stats_yes": dict(weekly_stats_yes),
+        "weekly_stats_no": dict(weekly_stats_no),
+        "current_week_key": current_week_key,
     }
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
@@ -358,7 +420,7 @@ def load_data():
     global stats_yes, stats_no, stats_stickers, stats_photos
     global usernames, sessions, consecutive_yes, consecutive_no, consecutive_button_press
     global last_button_press_time, achievements_unlocked, successful_polls, user_levels
-    global asked_today
+    global asked_today, weekly_stats_yes, weekly_stats_no, current_week_key
     
     if not os.path.exists(DATA_FILE):
         logger.info("Файл данных не найден, начинаем с чистого листа")
@@ -383,6 +445,11 @@ def load_data():
         # СИСТЕМА КОНТЕНТА: загружаем asked_today
         asked_today.update(data.get("asked_today", []))
         
+        # НЕДЕЛЬНАЯ СТАТИСТИКА
+        weekly_stats_yes.update(data.get("weekly_stats_yes", {}))
+        weekly_stats_no.update(data.get("weekly_stats_no", {}))
+        current_week_key = data.get("current_week_key")
+        
         last_button_press_time_data = data.get("last_button_press_time", {})
         for k, v in last_button_press_time_data.items():
             try:
@@ -397,6 +464,10 @@ def load_data():
                 logger.warning(f"Ошибка при загрузке ачивок для пользователя {uid}: {e}")
         
         logger.info("Данные успешно загружены")
+        
+        # Обновляем недельную статистику после загрузки
+        update_weekly_stats()
+        
     except json.JSONDecodeError as e:
         logger.error(f"Ошибка формата JSON: {e}")
     except Exception as e:
@@ -577,34 +648,7 @@ def get_grouped_top(stats_dict, level_func):
     
     return result
 
-# --- НЕДЕЛЬНЫЙ ТОП ДЛЯ ПЯТНИЧНОГО ПОЗДРАВЛЕНИЯ ---
-def get_weekly_winners():
-    """Получить победителей за неделю с группировкой по местам"""
-    # Используем екатеринбургское время
-    now_ekt = datetime.utcnow() + timedelta(hours=5)
-    week_ago = now_ekt - timedelta(days=7)
-    
-    # Статистика за неделю
-    weekly_yes = defaultdict(int)
-    weekly_no = defaultdict(int)
-    
-    for t, uid, ans in sessions:
-        # Конвертируем время сессии в ЕКБ для сравнения
-        session_time_ekt = t + timedelta(hours=5)
-        if session_time_ekt >= week_ago:
-            if ans == "Да, конечно":
-                weekly_yes[uid] += 1
-            elif ans == "Нет":
-                weekly_no[uid] += 1
-    
-    # Группируем топ курильщика за неделю (первые 3 места)
-    top_smokers_grouped = get_grouped_top(dict(weekly_yes), get_smoker_level)
-    
-    # Группируем топ работяг за неделю (первые 3 места)
-    top_workers_grouped = get_grouped_top(dict(weekly_no), get_worker_level)
-    
-    return top_smokers_grouped, top_workers_grouped
-
+# --- ОБНОВЛЕННАЯ ФУНКЦИЯ ПЯТНИЧНОГО НАГРАЖДЕНИЯ ---
 async def friday_rewards(context: ContextTypes.DEFAULT_TYPE):
     """Пятничное награждение по недельному топу"""
     # Используем екатеринбургское время
@@ -617,18 +661,26 @@ async def friday_rewards(context: ContextTypes.DEFAULT_TYPE):
     logger.info("🎉 Запуск пятничного награждения по недельному топу")
     
     try:
-        top_smokers, top_workers = await get_weekly_winners()
+        # Обновляем недельную статистику перед подсчетом
+        update_weekly_stats()
         
-        message = "🎉 *ПЯТНИЦА! Подводим итоги недели!* 🎉\n\n"
+        # Группируем топ курильщика за неделю (первые 3 места)
+        top_smokers_grouped = get_grouped_top(dict(weekly_stats_yes), get_smoker_level)
         
-        if top_smokers:
+        # Группируем топ работяг за неделю (первые 3 места)
+        top_workers_grouped = get_grouped_top(dict(weekly_stats_no), get_worker_level)
+        
+        week_range = get_week_range_display()
+        message = f"🎉 *ПЯТНИЦА! Подводим итоги недели {week_range}!* 🎉\n\n"
+        
+        if top_smokers_grouped:
             message += "🏆 *Топ курильщиков этой недели:*\n"
             
             # Группируем по местам для вывода
             current_place = None
             current_winners = []
             
-            for place, username, count, level in top_smokers:
+            for place, username, count, level in top_smokers_grouped:
                 if place != current_place:
                     if current_winners:
                         # Выводим предыдущую группу
@@ -659,14 +711,14 @@ async def friday_rewards(context: ContextTypes.DEFAULT_TYPE):
         else:
             message += "🚭 На этой неделе никто не курил\n\n"
         
-        if top_workers:
+        if top_workers_grouped:
             message += "💪 *Топ работяг этой недели:*\n"
             
             # Группируем по местам для вывода
             current_place = None
             current_winners = []
             
-            for place, username, count, level in top_workers:
+            for place, username, count, level in top_workers_grouped:
                 if place != current_place:
                     if current_winners:
                         # Выводим предыдущую группу
@@ -696,11 +748,11 @@ async def friday_rewards(context: ContextTypes.DEFAULT_TYPE):
             message += "💼 На этой неделе никто не работал\n"
         
         # Общая статистика за неделю
-        week_ago = now_ekt - timedelta(days=7)
-        week_sessions = [s for s in sessions if (s[0] + timedelta(hours=5)) >= week_ago]
-        week_polls = [p for p in successful_polls if (p + timedelta(hours=5)) >= week_ago]
+        monday, friday = get_current_week_range()
+        week_sessions = [s for s in sessions if monday <= (s[0] + timedelta(hours=5)) <= friday]
+        week_polls = [p for p in successful_polls if monday <= (p + timedelta(hours=5)) <= friday]
         
-        message += f"\n📊 *Статистика за неделю:*\n"
+        message += f"\n📊 *Статистика за неделю {week_range}:*\n"
         message += f"• Перекуров: {len(week_polls)}\n"
         message += f"• Голосов: {len(week_sessions)}\n"
         
@@ -1139,77 +1191,43 @@ async def show_basic_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(text)
 
+# --- ОБНОВЛЕННАЯ КОМАНДА /top ---
 async def show_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Объединенный топ курильщиков и работяг"""
+    """Объединенный топ курильщиков и работяг с новой логикой недельного топа"""
     if not sessions:
         await update.message.reply_text("📊 Пока нет статистики.")
         return
     
-    # Используем екатеринбургское время для недельной статистики
-    now_ekt = datetime.utcnow() + timedelta(hours=5)
-    week_ago = now_ekt - timedelta(days=7)
+    # Обновляем недельную статистику
+    update_weekly_stats()
     
-    # Общая статистика (все время)
-    response = "🏆 *ТОП УЧАСТНИКОВ*\n\n"
+    week_range = get_week_range_display()
+    response = f"🏆 *ТОП УЧАСТНИКОВ* (неделя {week_range})\n\n"
     
-    # Топ курильщиков (все время)
-    if stats_yes:
-        response += "🚬 *ТОП КУРИЛЬЩИКОВ (все время):*\n"
-        smoker_top = get_grouped_top(stats_yes, get_smoker_level)
+    # Топ курильщиков за текущую неделю
+    if weekly_stats_yes:
+        response += "🚬 *ТОП КУРИЛЬЩИКОВ (текущая неделя):*\n"
+        smoker_top = get_grouped_top(weekly_stats_yes, get_smoker_level)
         for place, username, count, level in smoker_top:
             medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(place, "🏅")
             response += f"{medal} {username}: {count} раз - {level}\n"
     else:
-        response += "🚬 *ТОП КУРИЛЬЩИКОВ:*\nПока нет данных\n"
+        response += "🚬 *ТОП КУРИЛЬЩИКОВ:*\nПока нет данных за эту неделю\n"
     
     response += "\n"
     
-    # Топ работяг (все время)
-    if stats_no:
-        response += "💪 *ТОП РАБОТЯГ (все время):*\n"
-        worker_top = get_grouped_top(stats_no, get_worker_level)
+    # Топ работяг за текущую неделю
+    if weekly_stats_no:
+        response += "💪 *ТОП РАБОТЯГ (текущая неделя):*\n"
+        worker_top = get_grouped_top(weekly_stats_no, get_worker_level)
         for place, username, count, level in worker_top:
             medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(place, "🏅")
             response += f"{medal} {username}: {count} раз - {level}\n"
     else:
-        response += "💪 *ТОП РАБОТЯГ:*\nПока нет данных\n"
+        response += "💪 *ТОП РАБОТЯГ:*\nПока нет данных за эту неделю\n"
     
-    response += "\n"
-    
-    # Недельная статистика
-    weekly_yes = defaultdict(int)
-    weekly_no = defaultdict(int)
-    
-    for t, uid, ans in sessions:
-        # Конвертируем время сессии в ЕКБ для сравнения
-        session_time_ekt = t + timedelta(hours=5)
-        if session_time_ekt >= week_ago:
-            if ans == "Да, конечно":
-                weekly_yes[uid] += 1
-            elif ans == "Нет":
-                weekly_no[uid] += 1
-    
-    # Недельный топ курильщиков
-    if weekly_yes:
-        response += "📅 *НЕДЕЛЬНЫЙ ТОП КУРИЛЬЩИКОВ:*\n"
-        weekly_smoker_top = get_grouped_top(weekly_yes, get_smoker_level)
-        for place, username, count, level in weekly_smoker_top:
-            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(place, "🏅")
-            response += f"{medal} {username}: {count} раз - {level}\n"
-    else:
-        response += "📅 *НЕДЕЛЬНЫЙ ТОП КУРИЛЬЩИКОВ:*\nПока нет данных\n"
-    
-    response += "\n"
-    
-    # Недельный топ работяг
-    if weekly_no:
-        response += "📅 *НЕДЕЛЬНЫЙ ТОП РАБОТЯГ:*\n"
-        weekly_worker_top = get_grouped_top(weekly_no, get_worker_level)
-        for place, username, count, level in weekly_worker_top:
-            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(place, "🏅")
-            response += f"{medal} {username}: {count} раз - {level}\n"
-    else:
-        response += "📅 *НЕДЕЛЬНЫЙ ТОП РАБОТЯГ:*\nПока нет данных\n"
+    response += f"\n📅 *Период:* {week_range}\n"
+    response += "🔄 *Каждый понедельник статистика обнуляется*"
     
     await update.message.reply_text(response, parse_mode='Markdown')
 
@@ -1220,7 +1238,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ("/stats", "Общая статистика перекуров"),
         ("/stats_detailed", "Детальная статистика с графиками"),
         ("/me", "Твоя персональная статистика с графиками"),
-        ("/top", "Топ курильщиков и работяг"),
+        ("/top", "Топ курильщиков и работяг (текущая неделя)"),
         ("/help", "Показать все команды"),
         ("/time", "Проверить время сервера"),
         ("/reset", "Сброс статистики (только админ)"),
@@ -1272,6 +1290,10 @@ async def reset_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_levels.clear()
     content_submissions.clear()
     asked_today.clear()
+    weekly_stats_yes.clear()
+    weekly_stats_no.clear()
+    global current_week_key
+    current_week_key = None
     
     save_data()
     await update.message.reply_text("🔄 Статистика и ачивки сброшены!")
@@ -1393,6 +1415,9 @@ async def handle_poll_update(update: Update, context: ContextTypes.DEFAULT_TYPE)
             
             sessions.append((last_poll_time, user_id, answer))
             await check_achievements(user_id, context)
+        
+        # Обновляем недельную статистику
+        update_weekly_stats()
         
         # Проверяем успешность опроса
         yes_votes = sum(1 for vote in poll_votes.values() if vote == "Да, конечно")
@@ -1517,10 +1542,17 @@ def main():
         days=(4,)  # Только пятница
     )
     
-    # Сохранение данных каждые 5 минут
+    # Сохранение данных каждые 5 минут (ИСПРАВЛЕННАЯ ФУНКЦИЯ)
     job_queue.run_repeating(
         save_data,
         interval=300,
+        first=10
+    )
+    
+    # Еженедельное обновление статистики (для автоматического сброса в понедельник)
+    job_queue.run_repeating(
+        update_weekly_stats,
+        interval=3600,  # Каждый час
         first=10
     )
     
