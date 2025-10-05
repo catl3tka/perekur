@@ -15,6 +15,13 @@ from telegram.ext import (
     MessageHandler, filters, PollAnswerHandler
 )
 
+# --- Настройка логирования ---
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
 # --- Настройки ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROUP_CHAT_ID = -1003072750672
@@ -509,3 +516,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
