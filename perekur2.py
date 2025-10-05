@@ -502,18 +502,26 @@ async def check_level_up(user_id: int, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Проверка ачивок ---
 async def check_achievements(user_id: int, context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now()
-    week_ago = now - timedelta(days=7)
+    # Используем екатеринбургское время для проверки ачивок
+    now_utc = datetime.utcnow()
+    now_ekt = now_utc + timedelta(hours=5)  # YEKT = UTC + 5
     
-    yes_week = sum(1 for t, uid, ans in sessions if uid == user_id and ans == "Да, конечно" and t >= week_ago)
-    no_week = sum(1 for t, uid, ans in sessions if uid == user_id and ans == "Нет" and t >= week_ago)
+    week_ago = now_ekt - timedelta(days=7)
+    
+    # Фильтруем сессии по екатеринбургскому времени
+    yes_week = sum(1 for t, uid, ans in sessions 
+                  if uid == user_id and ans == "Да, конечно" 
+                  and (t + timedelta(hours=5)) >= week_ago)  # Конвертируем время сессии в ЕКБ
+    no_week = sum(1 for t, uid, ans in sessions 
+                 if uid == user_id and ans == "Нет" 
+                 and (t + timedelta(hours=5)) >= week_ago)
 
     if consecutive_yes[user_id] >= CONSECUTIVE_THRESHOLD:
         await give_achievement(user_id, context, "Серийный курильщик")
     if consecutive_no[user_id] >= CONSECUTIVE_THRESHOLD:
         await give_achievement(user_id, context, "Серийный ЗОЖник")
 
-    h = now.hour
+    h = now_ekt.hour  # Используем екатеринбургское время для проверки времени суток
     if consecutive_yes[user_id] >= 1:
         if 0 <= h <= 7:
             await give_achievement(user_id, context, "Ранний перекур")
@@ -572,11 +580,15 @@ def get_grouped_top(stats_dict, level_func):
 # --- СИСТЕМА КОНТЕНТА ДНЯ ---
 def get_active_users():
     """Получить список активных пользователей за последние 7 дней"""
-    week_ago = datetime.now() - timedelta(days=7)
+    # Используем екатеринбургское время
+    now_ekt = datetime.utcnow() + timedelta(hours=5)
+    week_ago = now_ekt - timedelta(days=7)
     active_users = set()
     
     for t, uid, _ in sessions:
-        if t >= week_ago:
+        # Конвертируем время сессии в ЕКБ для сравнения
+        session_time_ekt = t + timedelta(hours=5)
+        if session_time_ekt >= week_ago:
             active_users.add(uid)
     
     return list(active_users)
@@ -593,9 +605,9 @@ async def ask_for_content(context: ContextTypes.DEFAULT_TYPE, user_id: int = Non
     """Запросить контент у пользователя"""
     global current_content_author
     
-    # Проверяем рабочий день (Пн-Пт)
-    today = datetime.now()
-    if today.weekday() >= 5:  # 5=Сб, 6=Вс
+    # Проверяем рабочий день (Пн-Пт) по екатеринбургскому времени
+    now_ekt = datetime.utcnow() + timedelta(hours=5)
+    if now_ekt.weekday() >= 5:  # 5=Сб, 6=Вс
         logger.info("📅 Сегодня выходной, пропускаем запрос контента")
         return
     
@@ -649,13 +661,13 @@ async def handle_content_submission(update: Update, context: ContextTypes.DEFAUL
     if user_id not in asked_today:
         return
     
-    today = datetime.now().date()
+    today_ekt = (datetime.utcnow() + timedelta(hours=5)).date()
     
     try:
         # Сохраняем сообщение для последующей публикации
         content_submissions[user_id] = {
             "message": message,
-            "date": datetime.now()
+            "date": datetime.utcnow()  # Сохраняем в UTC
         }
         
         # Определяем тип контента для логов
@@ -690,634 +702,124 @@ async def handle_content_submission(update: Update, context: ContextTypes.DEFAUL
 
 async def publish_daily_content(context: ContextTypes.DEFAULT_TYPE):
     """Публикация ежедневного контента в 10:00"""
-    today = datetime.now().date()
+    # Используем екатеринбургское время
+    today_ekt = (datetime.utcnow() + timedelta(hours=5)).date()
     
     # Проверяем рабочий день
-    if datetime.now().weekday() >= 5:
+    if (datetime.utcnow() + timedelta(hours=5)).weekday() >= 5:
+        logger.info("📅 Сегодня выходной, пропускаем публикацию контента")
         return
     
-    # Ищем контент для публикации
-    content_to_publish = None
-    author_id = None
-    
-    for user_id, submission in content_submissions.items():
-        if submission["date"].date() == today:
-            content_to_publish = submission["message"]
-            author_id = user_id
-            break
-    
-    if content_to_publish and author_id:
+    if not content_submissions:
+        logger.info("📭 Нет контента для публикации сегодня")
         try:
-            # Пересылаем сообщение в группу (без указания автора)
-            await forward_message_to_group(context, content_to_publish)
-            
-            # Удаляем из временного хранилища
-            del content_submissions[author_id]
-            logger.info(f"✅ Контент от пользователя {author_id} опубликован")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка при публикации контента: {e}")
-    else:
-        logger.info("📭 Контент для публикации не найден")
-
-async def forward_message_to_group(context: ContextTypes.DEFAULT_TYPE, message):
-    """Переслать сообщение в группу с анонимной подписью"""
-    try:
-        # Определяем тип контента для заголовка
-        content_type = "Контент"
-        if message.photo:
-            content_type = "Мем дня" 
-        elif message.video:
-            content_type = "Видео дня"
-        elif message.audio:
-            content_type = "Музыка дня"
-        elif message.text:
-            content_type = "Анекдот дня"
-        elif message.document:
-            content_type = "Файл дня"
-        elif message.animation:
-            content_type = "GIF дня"
-        
-        # Сначала отправляем заголовок
-        await context.bot.send_message(
-            chat_id=GROUP_CHAT_ID,
-            text=f"🎭 *{content_type}!*\n\n_Прислано анонимно_ 👻",
-            parse_mode='Markdown'
-        )
-        
-        # Затем пересылаем сам контент
-        if message.text:
             await context.bot.send_message(
                 chat_id=GROUP_CHAT_ID,
-                text=message.text
+                text="📰 *Контент дня*\n\n"
+                     "Сегодня никто не прислал контент для публикации 😔\n\n"
+                     "Завтра у кого-то другого будет шанс! 🎲",
+                parse_mode='Markdown'
             )
-        elif message.photo:
-            await context.bot.send_photo(
-                chat_id=GROUP_CHAT_ID,
-                photo=message.photo[-1].file_id,
-                caption=message.caption
-            )
-        elif message.video:
-            await context.bot.send_video(
-                chat_id=GROUP_CHAT_ID,
-                video=message.video.file_id,
-                caption=message.caption
-            )
-        elif message.audio:
-            await context.bot.send_audio(
-                chat_id=GROUP_CHAT_ID,
-                audio=message.audio.file_id,
-                caption=message.caption
-            )
-        elif message.document:
-            await context.bot.send_document(
-                chat_id=GROUP_CHAT_ID,
-                document=message.document.file_id,
-                caption=message.caption
-            )
-        elif message.animation:  # GIF
-            await context.bot.send_animation(
-                chat_id=GROUP_CHAT_ID,
-                animation=message.animation.file_id,
-                caption=message.caption
-            )
-        elif message.voice:
-            await context.bot.send_voice(
-                chat_id=GROUP_CHAT_ID,
-                voice=message.voice.file_id
-            )
-        elif message.sticker:
-            await context.bot.send_sticker(
-                chat_id=GROUP_CHAT_ID,
-                sticker=message.sticker.file_id
-            )
-            
-    except Exception as e:
-        logger.error(f"❌ Ошибка при пересылке сообщения: {e}")
-        raise e
-
-# --- НОВЫЕ ФУНКЦИИ: Топ работяг и еженедельные итоги ---
-async def show_workers_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Топ работяг по ответам 'Нет'"""
-    grouped_top = get_grouped_top(dict(stats_no), get_worker_level)
-    
-    if not grouped_top:
-        await update.message.reply_text("Ещё никто не работал 🚭")
+        except Exception as e:
+            logger.error(f"❌ Ошибка при отправке уведомления об отсутствии контента: {e}")
         return
     
-    top_list = []
-    for place, username, count, level in grouped_top:
-        top_list.append(f"{place}. {username} — {count} ({level})")
-    
-    await update.message.reply_text("💪 Топ работяг:\n\n" + "\n".join(top_list))
-
-async def get_weekly_winners():
-    """Получить победителей за неделю с группировкой по местам"""
-    week_ago = datetime.now() - timedelta(days=7)
-    
-    # Статистика за неделю
-    weekly_yes = defaultdict(int)
-    weekly_no = defaultdict(int)
-    
-    for t, uid, ans in sessions:
-        if t >= week_ago:
-            if ans == "Да, конечно":
-                weekly_yes[uid] += 1
-            elif ans == "Нет":
-                weekly_no[uid] += 1
-    
-    # Группируем топ курильщика за неделю (первые 3 места)
-    top_smokers_grouped = get_grouped_top(dict(weekly_yes), get_smoker_level)
-    
-    # Группируем топ работяг за неделю (первые 3 места)
-    top_workers_grouped = get_grouped_top(dict(weekly_no), get_worker_level)
-    
-    return top_smokers_grouped, top_workers_grouped
-
-async def weekly_summary(context: ContextTypes.DEFAULT_TYPE):
-    """Еженедельное подведение итогов с группировкой по местам"""
-    logger.info("🎉 Функция weekly_summary запущена по расписанию!")
-    
     try:
-        top_smokers, top_workers = await get_weekly_winners()
-        
-        message = "🎉 *ПЯТНИЦА! Подводим итоги недели!* 🎉\n\n"
-        
-        if top_smokers:
-            message += "🏆 *Топ курильщиков этой недели:*\n"
-            
-            # Группируем по местам для вывода
-            current_place = None
-            current_winners = []
-            
-            for place, username, count, level in top_smokers:
-                if place != current_place:
-                    if current_winners:
-                        # Выводим предыдущую группу
-                        if len(current_winners) == 1:
-                            medal = "🥇" if current_place == 1 else "🥈" if current_place == 2 else "🥉"
-                            message += f"{medal} {current_winners[0]}\n"
-                        else:
-                            medal = "🥇" if current_place == 1 else "🥈" if current_place == 2 else "🥉"
-                            winners_text = ", ".join(current_winners)
-                            message += f"{medal} {winners_text}\n"
-                    
-                    current_place = place
-                    current_winners = [f"{username} — {count} раз ({level})"]
-                else:
-                    current_winners.append(f"{username} — {count} раз ({level})")
-            
-            # Выводим последнюю группу
-            if current_winners:
-                if len(current_winners) == 1:
-                    medal = "🥇" if current_place == 1 else "🥈" if current_place == 2 else "🥉"
-                    message += f"{medal} {current_winners[0]}\n"
-                else:
-                    medal = "🥇" if current_place == 1 else "🥈" if current_place == 2 else "🥉"
-                    winners_text = ", ".join(current_winners)
-                    message += f"{medal} {winners_text}\n"
-            
-            message += "\n"
-        else:
-            message += "🚭 На этой неделе никто не курил\n\n"
-        
-        if top_workers:
-            message += "💪 *Топ работяг этой недели:*\n"
-            
-            # Группируем по местам для вывода
-            current_place = None
-            current_winners = []
-            
-            for place, username, count, level in top_workers:
-                if place != current_place:
-                    if current_winners:
-                        # Выводим предыдущую группу
-                        if len(current_winners) == 1:
-                            medal = "🥇" if current_place == 1 else "🥈" if current_place == 2 else "🥉"
-                            message += f"{medal} {current_winners[0]}\n"
-                        else:
-                            medal = "🥇" if current_place == 1 else "🥈" if current_place == 2 else "🥉"
-                            winners_text = ", ".join(current_winners)
-                            message += f"{medal} {winners_text}\n"
-                    
-                    current_place = place
-                    current_winners = [f"{username} — {count} раз ({level})"]
-                else:
-                    current_winners.append(f"{username} — {count} раз ({level})")
-            
-            # Выводим последнюю группу
-            if current_winners:
-                if len(current_winners) == 1:
-                    medal = "🥇" if current_place == 1 else "🥈" if current_place == 2 else "🥉"
-                    message += f"{medal} {current_winners[0]}\n"
-                else:
-                    medal = "🥇" if current_place == 1 else "🥈" if current_place == 2 else "🥉"
-                    winners_text = ", ".join(current_winners)
-                    message += f"{medal} {winners_text}\n"
-        else:
-            message += "💼 На этой неделе никто не работал\n"
-        
-        # Общая статистика за неделю
-        week_ago = datetime.now() - timedelta(days=7)
-        week_sessions = [s for s in sessions if s[0] >= week_ago]
-        week_polls = [p for p in successful_polls if p >= week_ago]
-        
-        message += f"\n📊 *Статистика за неделю:*\n"
-        message += f"• Перекуров: {len(week_polls)}\n"
-        message += f"• Голосов: {len(week_sessions)}\n"
-        
-        message += "\nХороших выходных! 😊"
-        
+        # Отправляем заголовок
         await context.bot.send_message(
             chat_id=GROUP_CHAT_ID,
-            text=message,
+            text="📰 *Контент дня!*\n\n"
+                 "Сегодняшний анонимный контент от одного из участников:",
             parse_mode='Markdown'
         )
         
-        logger.info("✅ Еженедельные итоги успешно отправлены")
+        # Пересылаем все сохраненные сообщения (анонимно)
+        for user_id, submission in content_submissions.items():
+            message = submission["message"]
+            
+            # Пересылаем сообщение в группу (без указания автора)
+            if message.text:
+                await context.bot.send_message(
+                    chat_id=GROUP_CHAT_ID,
+                    text=message.text
+                )
+            elif message.photo:
+                await context.bot.send_photo(
+                    chat_id=GROUP_CHAT_ID,
+                    photo=message.photo[-1].file_id,
+                    caption=message.caption
+                )
+            elif message.video:
+                await context.bot.send_video(
+                    chat_id=GROUP_CHAT_ID,
+                    video=message.video.file_id,
+                    caption=message.caption
+                )
+            elif message.audio:
+                await context.bot.send_audio(
+                    chat_id=GROUP_CHAT_ID,
+                    audio=message.audio.file_id,
+                    caption=message.caption
+                )
+            elif message.document:
+                await context.bot.send_document(
+                    chat_id=GROUP_CHAT_ID,
+                    document=message.document.file_id,
+                    caption=message.caption
+                )
+            elif message.animation:
+                await context.bot.send_animation(
+                    chat_id=GROUP_CHAT_ID,
+                    animation=message.animation.file_id,
+                    caption=message.caption
+                )
+            elif message.sticker:
+                await context.bot.send_sticker(
+                    chat_id=GROUP_CHAT_ID,
+                    sticker=message.sticker.file_id
+                )
+            elif message.voice:
+                await context.bot.send_voice(
+                    chat_id=GROUP_CHAT_ID,
+                    voice=message.voice.file_id
+                )
+        
+        # Отправляем завершающее сообщение
+        await context.bot.send_message(
+            chat_id=GROUP_CHAT_ID,
+            text="🎭 *Контент опубликован анонимно*\n\n"
+                 "Завтра у другого участника будет шанс поделиться чем-то интересным!",
+            parse_mode='Markdown'
+        )
+        
+        logger.info(f"✅ Опубликован контент дня от {len(content_submissions)} пользователя(ей)")
         
     except Exception as e:
-        logger.error(f"❌ Ошибка при отправке еженедельных итогов: {e}")
+        logger.error(f"❌ Ошибка при публикации контента дня: {e}")
+    
+    # Сбрасываем состояние
+    reset_daily_content()
 
-# --- ИСПРАВЛЕННАЯ ЛОГИКА УСПЕШНОГО ПЕРЕКУРА ---
-async def close_poll(context: ContextTypes.DEFAULT_TYPE):
-    """Закрытие опроса и подсчет окончательных результатов"""
-    message_id = context.job.data
-    try:
-        await context.bot.stop_poll(chat_id=GROUP_CHAT_ID, message_id=message_id)
-        
-        # ИСПРАВЛЕНИЕ: Перекур успешен, если есть ХОТЯ БЫ ОДИН голос "Да"
-        yes_voters = [uid for uid, ans in poll_votes.items() if ans == "Да, конечно"]
-        
-        if yes_voters:  # Если есть хотя бы один "Да" - перекур успешен!
-            successful_polls.append(datetime.now())
-            
-            # Добавляем окончательные голоса в статистику (только последние голоса)
-            for user_id, answer in poll_votes.items():
-                sessions.append((datetime.now(), user_id, answer))
-                
-                # Обновляем счетчики статистики
-                if answer == "Да, конечно":
-                    stats_yes[user_id] += 1
-                    consecutive_yes[user_id] += 1
-                    consecutive_no[user_id] = 0
-                elif answer == "Нет":
-                    stats_no[user_id] += 1
-                    consecutive_no[user_id] += 1
-                    consecutive_yes[user_id] = 0
-                
-                # Проверяем другие ачивки и уровни
-                await check_achievements(user_id, context)
-            
-            save_data()
-            logger.info(f"✅ Опрос закрыт. Успешный перекур! Голосов 'Да': {len(yes_voters)}")
-            
-            # Ачивка "Один в курилке воин" - только один ответ "Да"
-            if len(yes_voters) == 1:
-                await give_achievement(yes_voters[0], context, "Один в курилке воин 🏹")
-            
-            # НОВАЯ АЧИВКА: "В соло тащу на себе завод" - только один ответ "Нет"
-            no_voters = [uid for uid, ans in poll_votes.items() if ans == "Нет"]
-            if len(no_voters) == 1:
-                await give_achievement(no_voters[0], context, "В соло тащу на себе завод 🏭")
-                
-        else:
-            logger.info(f"📭 Опрос закрыт. Голосов 'Да' нет, перекур не состоялся")
-            
-    except Exception as e:
-        logger.error(f"❌ Ошибка при закрытии опроса: {e}")
-
-# --- РАСПИСАНИЕ ПО ЕКАТЕРИНБУРГУ (YEKT = UTC + 5) ---
-def schedule_weekly_summary(application):
-    """Запланировать еженедельное подведение итогов"""
-    job_queue = application.job_queue
-    
-    if job_queue is None:
-        logger.error("❌ Job queue недоступна!")
-        return
-    
-    # Еженедельные итоги: пятница 16:45 по Екатеринбургу = 11:45 UTC
-    job_queue.run_daily(
-        weekly_summary,
-        time=time(hour=11, minute=45),  # 11:45 UTC = 16:45 Екатеринбург
-        days=(4,),  # 4 = пятница
-        name="weekly_summary"
-    )
-    
-    logger.info("✅ Еженедельные итоги запланированы на пятницу 16:45 по Екатеринбургу")
-
-def schedule_daily_content(application):
-    """Запланировать ежедневные задачи для системы контента"""
-    job_queue = application.job_queue
-    
-    if job_queue is None:
-        logger.error("❌ Job queue недоступна для системы контента!")
-        return
-    
-    # 08:30 по Екатеринбургу = 03:30 UTC
-    job_queue.run_daily(
-        ask_for_content,
-        time=time(hour=3, minute=30),
-        days=(0, 1, 2, 3, 4),  # Пн-Пт
-        name="content_first_request"
-    )
-    
-    # 09:30 по Екатеринбургу = 04:30 UTC
-    job_queue.run_daily(
-        lambda context: ask_for_content(context),
-        time=time(hour=4, minute=30),
-        days=(0, 1, 2, 3, 4),
-        name="content_second_request"
-    )
-    
-    # 10:00 по Екатеринбургу = 05:00 UTC
-    job_queue.run_daily(
-        publish_daily_content,
-        time=time(hour=5, minute=0),
-        days=(0, 1, 2, 3, 4),
-        name="content_publish"
-    )
-    
-    # 00:00 по Екатеринбургу = 19:00 UTC (предыдущего дня)
-    job_queue.run_daily(
-        lambda context: reset_daily_content(),
-        time=time(hour=19, minute=0),
-        days=(0, 1, 2, 3, 4, 5, 6),  # Каждый день
-        name="content_reset"
-    )
-    
-    logger.info("✅ Система 'Контент дня' запланирована по екатеринбургскому времени")
-
-# --- КОМАНДА ДЛЯ ПРОВЕРКИ ВРЕМЕНИ ---
-async def check_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Проверить время сервера и екатеринбургское время"""
-    now_utc = datetime.utcnow()
-    now_ekt = now_utc + timedelta(hours=5)  # YEKT = UTC + 5
-    
-    await update.message.reply_text(
-        f"⏰ *Текущее время:*\n"
-        f"🖥️ Сервер (UTC): {now_utc.strftime('%H:%M %d.%m.%Y')}\n"
-        f"🏔️ Екатеринбург (YEKT): {now_ekt.strftime('%H:%M %d.%m.%Y')}\n\n"
-        f"📋 *Расписание по Екатеринбургу:*\n"
-        f"• 🕣 08:30 - Запрос контента\n"
-        f"• 🕤 09:30 - Повторный запрос\n"
-        f"• 🕙 10:00 - Публикация контента\n"
-        f"• 🕛 00:00 - Сброс состояния\n"
-        f"• 🕟 16:45 - Итоги недели (пт)",
-        parse_mode='Markdown'
-    )
-
-# --- ТЕСТИРОВАНИЕ ---
-async def test_weekly_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Тестовая команда для запуска еженедельных итогов"""
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("⛔ У тебя нет прав для этой команды.")
-        return
-    
-    logger.info("🔧 Ручной запуск еженедельных итогов через команду /test_weekly")
-    await update.message.reply_text("🔧 Запускаю еженедельные итоги вручную...")
-    await weekly_summary(context)
-    await update.message.reply_text("✅ Еженедельные итоги отправлены вручную")
-
-async def test_content_system(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Тестовая команда для системы контента"""
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("⛔ У тебя нет прав для этой команды.")
-        return
-    
-    logger.info("🔧 Ручной запуск системы контента")
-    await update.message.reply_text("🔧 Запускаю систему контента...")
-    await ask_for_content(context, user_id)
-
-async def show_scheduled_jobs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать запланированные задачи"""
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("⛔ У тебя нет прав для этой команды.")
-        return
-    
-    job_queue = context.application.job_queue
-    if job_queue is None:
-        await update.message.reply_text("❌ Job queue недоступна")
-        return
-    
-    jobs = job_queue.jobs()
-    if not jobs:
-        await update.message.reply_text("📭 Нет запланированных задач")
-        return
-    
-    message = "📋 Запланированные задачи:\n\n"
-    for i, job in enumerate(jobs, 1):
-        message += f"{i}. {job.name}\n"
-    
-    await update.message.reply_text(message)
-
-# --- КОМАНДЫ СТАТИСТИКИ ---
-async def show_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Улучшенная команда /me с графиками и уровнями"""
-    user_id = update.effective_user.id
-    user_sessions = [(t, ans) for t, uid, ans in sessions if uid == user_id]
-    
-    if not user_sessions:
-        await update.message.reply_text("📊 У тебя еще нет данных для статистики.")
-        return
-    
-    try:
-        # Создаем персональный график
-        plot_buf = create_user_stats_plot(user_id)
-        
-        if plot_buf:
-            # Статистика с уровнями
-            yes_count = stats_yes[user_id]
-            no_count = stats_no[user_id]
-            total = yes_count + no_count
-            participation_rate = (total / len(successful_polls)) * 100 if successful_polls else 0
-            
-            # Получаем текущие уровни
-            smoker_level, _ = get_smoker_level(yes_count)
-            worker_level, _ = get_worker_level(no_count)
-            
-            # Серийные достижения
-            current_streak = max(consecutive_yes[user_id], consecutive_no[user_id])
-            streak_type = ""
-            if consecutive_yes[user_id] == current_streak:
-                streak_type = "Да"
-            elif consecutive_no[user_id] == current_streak:
-                streak_type = "Нет"
-            
-            caption = f"""📊 Твоя расширенная статистика:
-
-🗳️ Всего голосов: {total}
-✅ Сказал 'Да': {yes_count}
-❌ Сказал 'Нет': {no_count}
-📈 Участие в опросах: {participation_rate:.1f}%
-
-🎯 Твои уровни:
-🚬 {smoker_level}
-💪 {worker_level}
-
-🔥 Текущая серия: {current_streak} раз '{streak_type}'"""
-            
-            await update.message.reply_photo(
-                photo=InputFile(plot_buf, filename="my_stats.png"),
-                caption=caption
-            )
-        else:
-            # Если график не создался, показываем текстовую версию
-            await show_basic_me(update, context)
-            
-    except Exception as e:
-        logger.error(f"Ошибка при создании персональной статистики: {e}")
-        await show_basic_me(update, context)
-
-async def show_basic_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Базовая текстовая версия /me с уровнями"""
-    user_id = update.effective_user.id
-    yes_count = stats_yes[user_id]
-    no_count = stats_no[user_id]
-    total = yes_count + no_count
-    participation_rate = (total / len(successful_polls)) * 100 if successful_polls else 0
-    
-    # Получаем текущие уровни
-    smoker_level, _ = get_smoker_level(yes_count)
-    worker_level, _ = get_worker_level(no_count)
-    
-    # Серийные достижения
-    current_streak = max(consecutive_yes[user_id], consecutive_no[user_id])
-    streak_type = ""
-    if consecutive_yes[user_id] == current_streak:
-        streak_type = "Да"
-    elif consecutive_no[user_id] == current_streak:
-        streak_type = "Нет"
-    
-    text = f"""📊 Твоя статистика:
-
-🗳️ Всего голосов: {total}
-✅ Сказал 'Да': {yes_count}
-❌ Сказал 'Нет': {no_count}
-📈 Участие в опросах: {participation_rate:.1f}%
-
-🎯 Твои уровни:
-🚬 {smoker_level}
-💪 {worker_level}
-
-🔥 Текущая серия: {current_streak} раз '{streak_type}'"""
-    
-    await update.message.reply_text(text)
-
-async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    total_smoke_sessions = len(successful_polls)
-    total_votes = len(sessions)
-    
-    text = f"""📊 Общая статистика:
-
-🚬 Всего перекуров: {total_smoke_sessions}
-🗳️ Всего голосов: {total_votes}
-
-Используй:
-/stats_detailed - подробная статистика с графиками
-/me - твоя персональная статистика с графиками
-/top - топ курильщиков
-/workers_top - топ работяг
-/test_weekly - тест еженедельных итогов (админ)
-/test_content - тест системы контента (админ)
-/jobs - показать запланированные задачи (админ)
-/time - проверить время сервера"""
-    
-    await update.message.reply_text(text)
-
-async def show_detailed_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Детальная статистика с графиками"""
-    if not sessions:
-        await update.message.reply_text("📊 Еще нет данных для статистики.")
-        return
-    
-    try:
-        plot_buf = create_statistics_plot()
-        
-        if plot_buf:
-            today = datetime.now().date()
-            today_votes = sum(1 for t, _, _ in sessions if t.date() == today)
-            week_ago = today - timedelta(days=7)
-            week_votes = sum(1 for t, _, _ in sessions if t.date() >= week_ago)
-            
-            most_active_hour = Counter(t.hour for t, _, _ in sessions).most_common(1)[0]
-            most_active_day = Counter(t.weekday() for t, _, _ in sessions).most_common(1)[0]
-            days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
-            
-            caption = f"""📊 Детальная статистика:
-
-📅 Сегодня голосов: {today_votes}
-📅 За неделю: {week_votes}
-🕐 Самый активный час: {most_active_hour[0]}:00 ({most_active_hour[1]} голосов)
-📆 Самый активный день: {days[most_active_day[0]]} ({most_active_day[1]} голосов)"""
-            
-            await update.message.reply_photo(
-                photo=InputFile(plot_buf, filename="stats.png"),
-                caption=caption
-            )
-        else:
-            await update.message.reply_text("❌ Не удалось создать график статистики.")
-            
-    except Exception as e:
-        logger.error(f"Ошибка при создании статистики: {e}")
-        await update.message.reply_text("❌ Произошла ошибка при создании статистики.")
-
-async def show_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Топ курильщиков по ответам 'Да'"""
-    grouped_top = get_grouped_top(dict(stats_yes), get_smoker_level)
-    
-    if not grouped_top:
-        await update.message.reply_text("Ещё никто не курил 🚭")
-        return
-    
-    top_list = []
-    for place, username, count, level in grouped_top:
-        top_list.append(f"{place}. {username} — {count} ({level})")
-    
-    await update.message.reply_text("🏆 Топ курильщиков:\n\n" + "\n".join(top_list))
-
-# --- ОСНОВНОЙ ФУНКЦИОНАЛ ---
+# --- Команды ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Я бот для организации перекуров.\n\n"
-        "Нажми 'Курить 🚬' чтобы начать опрос в группе!",
+        "Привет! Я бот для организации перекуров 🚬\n\n"
+        "Используй кнопку 'Курить 🚬', чтобы начать опрос в группе!",
         reply_markup=reply_markup
     )
 
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = user.id
-    usernames[user_id] = user.username or user.first_name or "Безымянный"
+    user_id = update.effective_user.id
+    username = update.effective_user.username or update.effective_user.first_name
+    usernames[user_id] = username
     
     now = datetime.now()
-    cooldown_remaining = None
+    last_press = last_button_press_time[user_id]
     
-    # Используем global для last_poll_time
-    global last_poll_time
-    
-    if last_poll_time:
-        time_since_last_poll = now - last_poll_time
-        if time_since_last_poll < COOLDOWN:
-            remaining_seconds = int((COOLDOWN - time_since_last_poll).total_seconds())
-            cooldown_remaining = remaining_seconds
-    
-    if cooldown_remaining:
-        minutes = cooldown_remaining // 60
-        seconds = cooldown_remaining % 60
+    if now - last_press < COOLDOWN:
+        remaining = COOLDOWN - (now - last_press)
         await update.message.reply_text(
-            f"⏳ Следующий перекур можно будет начать через {minutes}:{seconds:02d}",
-            reply_markup=reply_markup
-        )
-        return
-    
-    # Проверяем время последнего нажатия кнопки этим пользователем
-    last_press = last_button_press_time.get(user_id, datetime.min)
-    if now - last_press < timedelta(seconds=10):
-        await update.message.reply_text(
-            "⏳ Подожди немного перед следующим запросом!",
+            f"⏳ Подожди еще {int(remaining.total_seconds() // 60)} минут(ы) перед следующим запросом.",
             reply_markup=reply_markup
         )
         return
@@ -1325,232 +827,496 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last_button_press_time[user_id] = now
     consecutive_button_press[user_id] += 1
     
-    if consecutive_button_press[user_id] >= 5:
+    if consecutive_button_press[user_id] >= 3:
         await give_achievement(user_id, context, "Настойчивый")
+    
+    global active_poll_id, active_poll_options, poll_votes, last_poll_time
+    if active_poll_id is not None:
+        await update.message.reply_text("Уже есть активный опрос! Голосуй там.", reply_markup=reply_markup)
+        return
+    
+    last_poll_time = now
+    poll_options = ["Да, конечно", "Нет"]
+    active_poll_options = poll_options
     
     try:
         message = await context.bot.send_poll(
             chat_id=GROUP_CHAT_ID,
-            question=f"Перекур? ({usernames[user_id]})",
-            options=["Да, конечно", "Нет"],
+            question=f"Курить? (от @{username})",
+            options=poll_options,
             is_anonymous=False,
+            allows_multiple_answers=False,
             open_period=POLL_DURATION
         )
-        
-        global active_poll_id, active_poll_options, poll_votes
         active_poll_id = message.poll.id
-        active_poll_options = ["Да, конечно", "Нет"]
-        poll_votes = {}  # Сбрасываем голоса для нового опроса
-        
-        last_poll_time = now
+        poll_votes = {}
+        logger.info(f"Создан новый опрос {active_poll_id} пользователем {user_id}")
         
         await update.message.reply_text("✅ Опрос создан!", reply_markup=reply_markup)
         
     except Exception as e:
         logger.error(f"Ошибка при создании опроса: {e}")
-        await update.message.reply_text("❌ Не удалось создать опрос", reply_markup=reply_markup)
+        await update.message.reply_text("❌ Ошибка при создании опроса.", reply_markup=reply_markup)
 
 async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка ответов на опрос - только сохраняем последний голос"""
-    global poll_votes
-    
-    answer = update.poll_answer
-    user_id = answer.user.id
-    
-    if answer.poll_id != active_poll_id:
+    global active_poll_id, poll_votes
+    if active_poll_id is None or update.poll_answer.poll_id != active_poll_id:
         return
     
-    if user_id not in usernames:
-        try:
-            user = await context.bot.get_chat(user_id)
-            usernames[user_id] = user.username or user.first_name or "Безымянный"
-        except Exception as e:
-            logger.warning(f"Не удалось получить информацию о пользователе {user_id}: {e}")
-            usernames[user_id] = "Неизвестный"
+    user_id = update.poll_answer.user.id
+    username = update.poll_answer.user.username or update.poll_answer.user.first_name
+    usernames[user_id] = username
     
-    selected_options = answer.option_ids
+    selected_options = update.poll_answer.option_ids
     if not selected_options:
-        # Пользователь отозвал голос
-        if user_id in poll_votes:
-            del poll_votes[user_id]
-        logger.info(f"Пользователь {usernames[user_id]} отозвал голос")
         return
     
     selected_option = active_poll_options[selected_options[0]]
-    
-    # Сохраняем только последний голос пользователя (перезаписываем предыдущий)
     poll_votes[user_id] = selected_option
     
-    logger.info(f"Пользователь {usernames[user_id]} проголосовал: {selected_option} (временный голос)")
+    logger.info(f"Пользователь {user_id} проголосовал: {selected_option}")
 
-async def send_common_poll(context: ContextTypes.DEFAULT_TYPE):
-    """Создание общего опроса"""
-    global active_poll_id, active_poll_options, last_poll_time, poll_votes
-    
-    now = datetime.now()
-    if last_poll_time and now - last_poll_time < COOLDOWN:
-        remaining = COOLDOWN - (now - last_poll_time)
-        mins = remaining.seconds // 60
-        try:
-            await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=f"⏳ Слишком часто! Попробуй через {mins} мин.")
-        except Exception as e:
-            logger.error(f"Ошибка при отправке сообщения о кулдауне: {e}")
+async def handle_poll_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global active_poll_id, poll_votes
+    if active_poll_id is None or update.poll.id != active_poll_id:
         return
-
-    question = "Курим? 🚬"
-    options = ["Да, конечно", "Нет"]
-
-    try:
-        poll_msg = await context.bot.send_poll(
-            chat_id=GROUP_CHAT_ID,
-            question=question,
-            options=options,
-            is_anonymous=False,
-            allows_multiple_answers=False
-        )
-        active_poll_id = poll_msg.poll.id
-        active_poll_options = options
-        last_poll_time = now
-        poll_votes = {}  # Сбрасываем голоса для нового опроса
-
-        # Закрытие через 10 минут
-        context.application.job_queue.run_once(close_poll, POLL_DURATION, data=poll_msg.message_id)
+    
+    if update.poll.is_closed:
+        logger.info(f"Опрос {active_poll_id} завершен")
         
-        logger.info(f"Создан новый опрос (ID: {active_poll_id})")
+        # Сохраняем только окончательные голоса
+        for user_id, answer in poll_votes.items():
+            if answer == "Да, конечно":
+                stats_yes[user_id] += 1
+                consecutive_yes[user_id] += 1
+                consecutive_no[user_id] = 0
+            elif answer == "Нет":
+                stats_no[user_id] += 1
+                consecutive_no[user_id] += 1
+                consecutive_yes[user_id] = 0
+            
+            sessions.append((last_poll_time, user_id, answer))
+            await check_achievements(user_id, context)
         
-    except Exception as e:
-        logger.error(f"Ошибка при создании опроса: {e}")
+        # Проверяем успешность опроса
+        yes_votes = sum(1 for vote in poll_votes.values() if vote == "Да, конечно")
+        if yes_votes > 0:
+            successful_polls.append(last_poll_time)
+            logger.info(f"Успешный перекур! {yes_votes} голосов 'Да'")
+        
+        save_data()
+        
+        # Сбрасываем состояние
+        active_poll_id = None
+        active_poll_options = []
+        poll_votes = {}
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if msg is None:
-        return
-        
-    user_id = msg.from_user.id
-    usernames[user_id] = msg.from_user.full_name
-
-    # Обработка контента для анонимной публикации (должна быть ПЕРВОЙ проверкой)
+    user_id = update.effective_user.id
+    username = update.effective_user.username or update.effective_user.first_name
+    usernames[user_id] = username
+    
+    message = update.message
+    
+    # Обработка контента дня (если пользователь был выбран)
     if user_id in asked_today:
         await handle_content_submission(update, context)
         return
-
-    # Старая логика для других функций бота
-    if msg.text == "Курить 🚬":
-        now = datetime.now()
-        
-        if (last_button_press_time[user_id] != datetime.min and 
-            now - last_button_press_time[user_id] < COOLDOWN):
-            consecutive_button_press[user_id] += 1
-            if consecutive_button_press[user_id] >= CONSECUTIVE_THRESHOLD:
-                await give_achievement(user_id, context, "Кнопколюб 🖲")
-        else:
-            consecutive_button_press[user_id] = 1
-            
-        last_button_press_time[user_id] = now
-        await send_common_poll(context)
-
-    if msg.text and msg.text.strip().endswith(")"):
-        await give_achievement(user_id, context, "Дед(Бабка) опять ногтей накидал(а))))")
-
-    if msg.photo:
-        stats_photos[user_id] += 1
-        if stats_photos[user_id] >= ACHIEVEMENT_PHOTOS_20:
-            await give_achievement(user_id, context, "Мемолог")
-
-    if msg.sticker:
+    
+    # Обычная обработка статистики
+    if message.sticker:
         stats_stickers[user_id] += 1
-        if stats_stickers[user_id] >= ACHIEVEMENT_STICKERS_20:
-            await give_achievement(user_id, context, "Стикеро(WO)MAN")
+        await check_achievements(user_id, context)
+        save_data()
+    elif message.photo:
+        stats_photos[user_id] += 1
+        await check_achievements(user_id, context)
+        save_data()
 
-    save_data()
-
-async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    commands = [
-        ("/start", "Начать работу с ботом"),
-        ("/stats", "Общая статистика перекуров"),
-        ("/stats_detailed", "Детальная статистика с графиками"),
-        ("/me", "Твоя персональная статистика с графиками"),
-        ("/top", "Топ курильщиков"),
-        ("/workers_top", "Топ работяг"),
-        ("/help", "Показать все команды"),
-        ("/reset", "Сброс статистики (только админ)"),
-        ("/test_weekly", "Тест еженедельных итогов (админ)"),
-        ("/test_content", "Тест системы контента (админ)"),
-        ("/jobs", "Показать запланированные задачи (админ)"),
-        ("/time", "Проверить время сервера"),
-    ]
-    text = "📖 Доступные команды:\n\n" + "\n".join([f"{cmd} — {desc}" for cmd, desc in commands])
-    await update.message.reply_text(text)
-
-async def reset_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("⛔ У тебя нет прав для сброса статистики.")
-        return
+    username = usernames.get(user_id, "Неизвестный")
     
-    stats_yes.clear()
-    stats_no.clear()
-    stats_stickers.clear()
-    stats_photos.clear()
-    usernames.clear()
-    sessions.clear()
-    consecutive_yes.clear()
-    consecutive_no.clear()
-    consecutive_button_press.clear()
-    last_button_press_time.clear()
-    achievements_unlocked.clear()
-    successful_polls.clear()
-    user_levels.clear()
-    content_submissions.clear()
-    asked_today.clear()
+    yes_count = stats_yes[user_id]
+    no_count = stats_no[user_id]
+    total = yes_count + no_count
+    yes_percentage = (yes_count / total * 100) if total > 0 else 0
     
-    save_data()
-    await update.message.reply_text("🔄 Статистика и ачивки сброшены!")
+    smoker_level, _ = get_smoker_level(yes_count)
+    worker_level, _ = get_worker_level(no_count)
+    
+    # Используем екатеринбургское время для недельной статистики
+    now_ekt = datetime.utcnow() + timedelta(hours=5)
+    week_ago = now_ekt - timedelta(days=7)
+    
+    # Фильтруем сессии по екатеринбургскому времени
+    yes_week = sum(1 for t, uid, ans in sessions 
+                  if uid == user_id and ans == "Да, конечно" 
+                  and (t + timedelta(hours=5)) >= week_ago)
+    no_week = sum(1 for t, uid, ans in sessions 
+                 if uid == user_id and ans == "Нет" 
+                 and (t + timedelta(hours=5)) >= week_ago)
+    
+    total_week = yes_week + no_week
+    yes_week_percentage = (yes_week / total_week * 100) if total_week > 0 else 0
+    
+    response = (
+        f"📊 *Статистика для {username}:*\n\n"
+        f"*Общая статистика:*\n"
+        f"🚬 Да: {yes_count}\n"
+        f"💪 Нет: {no_count}\n"
+        f"📈 Процент согласий: {yes_percentage:.1f}%\n\n"
+        f"*Статистика за неделю:*\n"
+        f"🚬 Да: {yes_week}\n"
+        f"💪 Нет: {no_week}\n"
+        f"📈 Процент согласий: {yes_week_percentage:.1f}%\n\n"
+        f"*Уровни:*\n"
+        f"🚬 {smoker_level}\n"
+        f"💪 {worker_level}\n\n"
+        f"*Дополнительно:*\n"
+        f"🎭 Стикеров отправлено: {stats_stickers[user_id]}\n"
+        f"📸 Фото отправлено: {stats_photos[user_id]}\n"
+        f"🏅 Ачивок получено: {len(achievements_unlocked[user_id])}"
+    )
+    
+    await update.message.reply_text(response, parse_mode='Markdown')
 
-def main():
-    if BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        logger.error("❌ Установите BOT_TOKEN через переменную окружения!")
+async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Объединенный топ курильщиков и работяг"""
+    if not sessions:
+        await update.message.reply_text("📊 Пока нет статистики.")
         return
     
-    load_data()
+    # Используем екатеринбургское время для недельной статистики
+    now_ekt = datetime.utcnow() + timedelta(hours=5)
+    week_ago = now_ekt - timedelta(days=7)
+    
+    # Общая статистика (все время)
+    response = "🏆 *ТОП УЧАСТНИКОВ*\n\n"
+    
+    # Топ курильщиков (все время)
+    if stats_yes:
+        response += "🚬 *ТОП КУРИЛЬЩИКОВ (все время):*\n"
+        smoker_top = get_grouped_top(stats_yes, get_smoker_level)
+        for place, username, count, level in smoker_top:
+            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(place, "🏅")
+            response += f"{medal} {username}: {count} раз - {level}\n"
+    else:
+        response += "🚬 *ТОП КУРИЛЬЩИКОВ:*\nПока нет данных\n"
+    
+    response += "\n"
+    
+    # Топ работяг (все время)
+    if stats_no:
+        response += "💪 *ТОП РАБОТЯГ (все время):*\n"
+        worker_top = get_grouped_top(stats_no, get_worker_level)
+        for place, username, count, level in worker_top:
+            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(place, "🏅")
+            response += f"{medal} {username}: {count} раз - {level}\n"
+    else:
+        response += "💪 *ТОП РАБОТЯГ:*\nПока нет данных\n"
+    
+    response += "\n"
+    
+    # Недельная статистика
+    weekly_yes = defaultdict(int)
+    weekly_no = defaultdict(int)
+    
+    for t, uid, ans in sessions:
+        # Конвертируем время сессии в ЕКБ для сравнения
+        session_time_ekt = t + timedelta(hours=5)
+        if session_time_ekt >= week_ago:
+            if ans == "Да, конечно":
+                weekly_yes[uid] += 1
+            elif ans == "Нет":
+                weekly_no[uid] += 1
+    
+    # Недельный топ курильщиков
+    if weekly_yes:
+        response += "📅 *НЕДЕЛЬНЫЙ ТОП КУРИЛЬЩИКОВ:*\n"
+        weekly_smoker_top = get_grouped_top(weekly_yes, get_smoker_level)
+        for place, username, count, level in weekly_smoker_top:
+            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(place, "🏅")
+            response += f"{medal} {username}: {count} раз - {level}\n"
+    else:
+        response += "📅 *НЕДЕЛЬНЫЙ ТОП КУРИЛЬЩИКОВ:*\nПока нет данных\n"
+    
+    response += "\n"
+    
+    # Недельный топ работяг
+    if weekly_no:
+        response += "📅 *НЕДЕЛЬНЫЙ ТОП РАБОТЯГ:*\n"
+        weekly_worker_top = get_grouped_top(weekly_no, get_worker_level)
+        for place, username, count, level in weekly_worker_top:
+            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(place, "🏅")
+            response += f"{medal} {username}: {count} раз - {level}\n"
+    else:
+        response += "📅 *НЕДЕЛЬНЫЙ ТОП РАБОТЯГ:*\nПока нет данных\n"
+    
+    await update.message.reply_text(response, parse_mode='Markdown')
+
+async def graph(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправка графика статистики"""
+    buf = create_statistics_plot()
+    if buf is None:
+        await update.message.reply_text("📊 Пока недостаточно данных для построения графиков.")
+        return
+    
+    await update.message.reply_photo(
+        photo=InputFile(buf, filename="statistics.png"),
+        caption="📊 *Общая статистика перекуров*",
+        parse_mode='Markdown'
+    )
+
+async def my_graph(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправка персонального графика статистики"""
+    user_id = update.effective_user.id
+    buf = create_user_stats_plot(user_id)
+    if buf is None:
+        await update.message.reply_text("📊 У тебя пока нет статистики для построения графиков.")
+        return
+    
+    username = usernames.get(user_id, "Пользователь")
+    await update.message.reply_photo(
+        photo=InputFile(buf, filename="my_statistics.png"),
+        caption=f"📊 *Персональная статистика: {username}*",
+        parse_mode='Markdown'
+    )
+
+async def achievements(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать полученные ачивки"""
+    user_id = update.effective_user.id
+    user_achievements = achievements_unlocked[user_id]
+    username = usernames.get(user_id, "Неизвестный")
+    
+    if not user_achievements:
+        await update.message.reply_text("🏅 У тебя пока нет ачивок. Продолжай участвовать в опросах!")
+        return
+    
+    response = f"🏅 *Ачивки пользователя {username}:*\n\n"
+    for i, achievement in enumerate(sorted(user_achievements), 1):
+        response += f"{i}. {achievement}\n"
+    
+    await update.message.reply_text(response, parse_mode='Markdown')
+
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Статистика для администратора"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ У вас нет прав для этой команды.")
+        return
+    
+    total_users = len(set(list(stats_yes.keys()) + list(stats_no.keys())))
+    total_sessions = len(sessions)
+    total_successful = len(successful_polls)
+    
+    # Используем екатеринбургское время
+    now_ekt = datetime.utcnow() + timedelta(hours=5)
+    week_ago = now_ekt - timedelta(days=7)
+    
+    # Фильтруем по екатеринбургскому времени
+    sessions_week = sum(1 for t, _, _ in sessions if (t + timedelta(hours=5)) >= week_ago)
+    successful_week = sum(1 for t in successful_polls if (t + timedelta(hours=5)) >= week_ago)
+    
+    response = (
+        f"👑 *Админ статистика:*\n\n"
+        f"• Всего пользователей: {total_users}\n"
+        f"• Всего сессий: {total_sessions}\n"
+        f"• Успешных перекуров: {total_successful}\n"
+        f"• Сессий за неделю: {sessions_week}\n"
+        f"• Успешных за неделю: {successful_week}\n"
+        f"• Активный опрос: {'Да' if active_poll_id else 'Нет'}\n"
+        f"• Размер файла данных: {os.path.getsize(DATA_FILE) if os.path.exists(DATA_FILE) else 0} байт"
+    )
+    
+    await update.message.reply_text(response, parse_mode='Markdown')
+
+async def reset_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ручной сброс недельной статистики (только для админа)"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ У вас нет прав для этой команды.")
+        return
+    
+    # В новой системе недельная статистика рассчитывается на лету из sessions
+    # поэтому не требует сброса. Но можно добавить уведомление о новом недельном топе
+    
+    # Используем екатеринбургское время
+    now_ekt = datetime.utcnow() + timedelta(hours=5)
+    
+    await update.message.reply_text(
+        f"✅ Недельная статистика рассчитывается автоматически.\n"
+        f"Текущая неделя: {now_ekt.strftime('%d.%m.%Y')}\n"
+        f"Недельный топ обновляется автоматически.",
+        parse_mode='Markdown'
+    )
+
+async def friday_rewards(context: ContextTypes.DEFAULT_TYPE):
+    """Пятничное награждение по недельному топу"""
+    # Используем екатеринбургское время
+    now_ekt = datetime.utcnow() + timedelta(hours=5)
+    
+    # Проверяем, что сегодня пятница (4) и время около 17:00
+    if now_ekt.weekday() != 4 or now_ekt.hour < 16:
+        return
+    
+    logger.info("🎉 Запуск пятничного награждения по недельному топу")
+    
+    # Рассчитываем недельную статистику
+    week_ago = now_ekt - timedelta(days=7)
+    weekly_yes = defaultdict(int)
+    weekly_no = defaultdict(int)
+    
+    for t, uid, ans in sessions:
+        session_time_ekt = t + timedelta(hours=5)
+        if session_time_ekt >= week_ago:
+            if ans == "Да, конечно":
+                weekly_yes[uid] += 1
+            elif ans == "Нет":
+                weekly_no[uid] += 1
+    
+    # Находим победителей недели
+    weekly_smoker_top = get_grouped_top(weekly_yes, get_smoker_level)
+    weekly_worker_top = get_grouped_top(weekly_no, get_worker_level)
     
     try:
-        app = Application.builder().token(BOT_TOKEN).build()
-
-        # Команды
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CommandHandler("stats", show_stats))
-        app.add_handler(CommandHandler("stats_detailed", show_detailed_stats))
-        app.add_handler(CommandHandler("me", show_me))
-        app.add_handler(CommandHandler("top", show_top))
-        app.add_handler(CommandHandler("workers_top", show_workers_top))
-        app.add_handler(CommandHandler("help", show_help))
-        app.add_handler(CommandHandler("reset", reset_stats))
-        app.add_handler(CommandHandler("test_weekly", test_weekly_summary))
-        app.add_handler(CommandHandler("test_content", test_content_system))
-        app.add_handler(CommandHandler("jobs", show_scheduled_jobs))
-        app.add_handler(CommandHandler("time", check_time))
-
-        # Сообщения - ОБНОВЛЕННЫЙ ОБРАБОТЧИК (поддерживает ВСЕ типы сообщений)
-        app.add_handler(MessageHandler(
-            filters.TEXT | filters.PHOTO | filters.VIDEO | filters.AUDIO | 
-            filters.Document.ALL | filters.ANIMATION | filters.VOICE | filters.STICKER, 
-            handle_message
-        ))
-
-        # Опросы
-        app.add_handler(PollAnswerHandler(handle_poll_answer))
-
-        logger.info("🤖 Бот запускается...")
+        message = "🎉 *ПЯТНИЧНОЕ НАГРАЖДЕНИЕ!*\n\n"
+        message += "По итогам рабочей недели определяем лучших:\n\n"
         
-        # Планировщики
-        schedule_weekly_summary(app)
-        schedule_daily_content(app)
+        if weekly_smoker_top:
+            message += "🚬 *Лучшие курильщики недели:*\n"
+            for place, username, count, level in weekly_smoker_top[:3]:  # Только первые 3 места
+                medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(place, "🏅")
+                message += f"{medal} {username} - {count} раз\n"
+        else:
+            message += "🚬 *Лучшие курильщики недели:*\nПока нет данных\n"
         
-        app.run_polling(drop_pending_updates=True)
+        message += "\n"
+        
+        if weekly_worker_top:
+            message += "💪 *Лучшие работяги недели:*\n"
+            for place, username, count, level in weekly_worker_top[:3]:  # Только первые 3 места
+                medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(place, "🏅")
+                message += f"{medal} {username} - {count} раз\n"
+        else:
+            message += "💪 *Лучшие работяги недели:*\nПока нет данных\n"
+        
+        message += "\nПоздравляем победителей! 🎊\nХороших выходных! 😊"
+        
+        await context.bot.send_message(
+            chat_id=GROUP_CHAT_ID,
+            text=message,
+            parse_mode='Markdown'
+        )
+        
+        logger.info("✅ Пятничное награждение отправлено")
         
     except Exception as e:
-        logger.error(f"❌ Критическая ошибка при запуске бота: {e}")
+        logger.error(f"❌ Ошибка при отправке пятничного награждения: {e}")
+
+async def daily_content_reminder(context: ContextTypes.DEFAULT_TYPE):
+    """Напоминание о контенте дня в 9:30"""
+    # Используем екатеринбургское время
+    now_ekt = datetime.utcnow() + timedelta(hours=5)
+    
+    # Проверяем рабочий день и время
+    if now_ekt.weekday() >= 5 or now_ekt.hour != 9 or now_ekt.minute != 30:
+        return
+    
+    logger.info("📝 Напоминание о контенте дня")
+    
+    try:
+        await context.bot.send_message(
+            chat_id=GROUP_CHAT_ID,
+            text="🎭 *Напоминание!*\n\n"
+                 "Сегодня в 10:00 будет опубликован *анонимный контент дня*!\n\n"
+                 "Если ты был выбран сегодняшним автором - не забудь отправить свой контент!",
+            parse_mode='Markdown'
+        )
+    except Exception as e:
+        logger.error(f"❌ Ошибка при отправке напоминания: {e}")
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"Ошибка: {context.error}", exc_info=context.error)
+
+# --- Основная функция ---
+def main():
+    load_data()
+    
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Обработчики команд
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(CommandHandler("top", top))
+    application.add_handler(CommandHandler("graph", graph))
+    application.add_handler(CommandHandler("my_graph", my_graph))
+    application.add_handler(CommandHandler("achievements", achievements))
+    application.add_handler(CommandHandler("admin_stats", admin_stats))
+    application.add_handler(CommandHandler("reset_week", reset_week))
+    
+    # Обработчики сообщений
+    application.add_handler(MessageHandler(filters.Regex("^Курить 🚬$"), handle_button))
+    
+    # ОБНОВЛЕННЫЙ ФИЛЬТР для обработки всех типов сообщений
+    application.add_handler(MessageHandler(
+        filters.TEXT | filters.PHOTO | filters.VIDEO | filters.AUDIO | 
+        filters.Document.ALL | filters.ANIMATION | filters.VOICE | filters.Sticker.ALL, 
+        handle_message
+    ))
+    
+    # Обработчики опросов
+    application.add_handler(PollAnswerHandler(handle_poll_answer))
+    application.add_handler(MessageHandler(filters.POLL, handle_poll_update))
+    
+    # Обработчик ошибок
+    application.add_error_handler(error_handler)
+    
+    # Планировщик задач
+    job_queue = application.job_queue
+    
+    # Ежедневный сброс состояния контента в 00:01 ЕКБ (19:01 UTC)
+    job_queue.run_daily(
+        lambda context: reset_daily_content(),
+        time=time(hour=19, minute=1, second=0),  # 00:01 ЕКБ
+        days=(0, 1, 2, 3, 4, 5, 6)
+    )
+    
+    # Запрос контента в 9:00 ЕКБ (4:00 UTC)
+    job_queue.run_daily(
+        lambda context: application.create_task(ask_for_content(context)),
+        time=time(hour=4, minute=0, second=0),  # 9:00 ЕКБ
+        days=(0, 1, 2, 3, 4)  # Пн-Пт
+    )
+    
+    # Напоминание о контенте в 9:30 ЕКБ (4:30 UTC)
+    job_queue.run_daily(
+        lambda context: application.create_task(daily_content_reminder(context)),
+        time=time(hour=4, minute=30, second=0),  # 9:30 ЕКБ
+        days=(0, 1, 2, 3, 4)  # Пн-Пт
+    )
+    
+    # Публикация контента в 10:00 ЕКБ (5:00 UTC)
+    job_queue.run_daily(
+        lambda context: application.create_task(publish_daily_content(context)),
+        time=time(hour=5, minute=0, second=0),  # 10:00 ЕКБ
+        days=(0, 1, 2, 3, 4)  # Пн-Пт
+    )
+    
+    # Пятничное награждение в 17:00 ЕКБ (12:00 UTC)
+    job_queue.run_daily(
+        lambda context: application.create_task(friday_rewards(context)),
+        time=time(hour=12, minute=0, second=0),  # 17:00 ЕКБ
+        days=(4,)  # Только пятница
+    )
+    
+    # Сохранение данных каждые 5 минут
+    job_queue.run_repeating(
+        lambda context: save_data(),
+        interval=300,
+        first=10
+    )
+    
+    logger.info("Бот запущен")
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
